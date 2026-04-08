@@ -41,8 +41,10 @@ let
   # closure of only the packages we need and mount just those paths.
   closureInfoDrv = pkgs.closureInfo {
     rootPaths =
-      [ sandboxBin pkgs.bubblewrap ]
-      ++ lib.optional (cfg.app.package != null) cfg.app.package;
+      [ sandboxBin pkgs.bubblewrap pkgs.cacert ]
+      ++ lib.optional (cfg.app.package != null) cfg.app.package
+      ++ lib.optional (networkMode == "filtered") networkSetupScript
+      ;
   };
 
   # --- Mount path helpers ---
@@ -70,6 +72,69 @@ let
     if cfg.app.package != null
     then "${cfg.app.package}/${cfg.app.binPath}"
     else "${sandboxBin}/bin/bash";
+
+  # --- Network mode ---
+  # null → host network, true → filtered (slirp4netns + iptables), false → no network
+  networkMode =
+    if cfg.network.enable == true then "filtered"
+    else if cfg.network.enable == false then "blocked"
+    else "host";
+
+  # Custom resolv.conf for slirp4netns (points to its virtual DNS at 10.0.2.3)
+  customResolvConf = pkgs.writeText "ocsb-resolv.conf" "nameserver 10.0.2.3\n";
+
+   # Network setup script — runs INSIDE sandbox as first command before payload.
+   # Attempts iptables-based filtering (best-effort: requires kernel support for
+   # netfilter in user namespaces, which some kernels like WSL2 restrict).
+   # Even without iptables, network isolation is provided by:
+   #   - Network namespace isolation (--unshare-net)
+   #   - slirp4netns userspace NAT (--disable-host-loopback)
+   #   - Custom resolv.conf (DNS through slirp4netns only)
+   networkSetupScript = pkgs.writeShellScript "${cfg.app.name}-net-setup" ''
+      # Wait for slirp4netns to create tap0 (parent starts it after reading child PID).
+      # Uses /proc/net/dev which is always available — no external tools needed.
+      _TAP_WAIT=0
+      while [ "$_TAP_WAIT" -lt 50 ] && ! ${pkgs.gnugrep}/bin/grep -q tap0 /proc/net/dev 2>/dev/null; do
+        ${pkgs.coreutils}/bin/sleep 0.1
+        _TAP_WAIT=$((_TAP_WAIT + 1))
+      done
+      if ! ${pkgs.gnugrep}/bin/grep -q tap0 /proc/net/dev 2>/dev/null; then
+        echo "ocsb: warning: tap0 not found after 5s — network may be unavailable" >&2
+      fi
+
+      _IPTABLES=""
+      if ${pkgs.iptables}/bin/iptables-legacy -L -n >/dev/null 2>&1; then
+        _IPTABLES="${pkgs.iptables}/bin/iptables-legacy"
+      elif ${pkgs.iptables}/bin/iptables -L -n >/dev/null 2>&1; then
+        _IPTABLES="${pkgs.iptables}/bin/iptables"
+      fi
+
+      if [ -n "$_IPTABLES" ]; then
+        "$_IPTABLES" -A OUTPUT -d 10.0.2.0/24 -j ACCEPT || true
+        ${lib.concatMapStringsSep "\n"
+          (range: ''"$_IPTABLES" -A OUTPUT -d ${lib.escapeShellArg range} -j DROP || true'')
+          cfg.network.blockedRanges}
+        # Verify at least one DROP rule was installed (fail closed)
+        ${lib.optionalString (cfg.network.blockedRanges != []) ''
+        if ! "$_IPTABLES" -C OUTPUT -d ${lib.escapeShellArg (builtins.head cfg.network.blockedRanges)} -j DROP 2>/dev/null; then
+          echo "ocsb: error: iptables available but firewall rules failed to apply — aborting" >&2
+          exit 1
+        fi
+        ''}
+      else
+        echo "ocsb: warning: iptables not available in this user namespace — private range blocking disabled" >&2
+        echo "ocsb: network isolation still active (namespace + slirp4netns + disable-host-loopback)" >&2
+      fi
+
+      # Drop capabilities if still present (defense-in-depth).
+      # Some bwrap/kernel combinations already drop all caps; others
+      # retain them inside user namespaces. Handle both gracefully.
+      if ! ${pkgs.gnugrep}/bin/grep -q 'CapEff:.*0000000000000000' /proc/self/status 2>/dev/null || \
+         ! ${pkgs.gnugrep}/bin/grep -q 'CapPrm:.*0000000000000000' /proc/self/status 2>/dev/null; then
+        exec ${pkgs.util-linux}/bin/setpriv --no-new-privs --bounding-set=-all -- "$@"
+      fi
+      exec "$@"
+    '';
 
   # --- Launcher script ---
   launcher = pkgs.writeShellScript "${cfg.app.name}-launcher" ''
@@ -109,6 +174,7 @@ let
     PROJECT_DIR="$(${pkgs.coreutils}/bin/realpath "$(pwd)")"
     CONTINUE=0
     OVERWRITE=0
+    RUNTIME_MOUNTS=()
 
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -122,6 +188,45 @@ let
           CONTINUE=1; shift ;;
         --overwrite)
           OVERWRITE=1; shift ;;
+        --ro|--rw)
+          [[ $# -ge 2 ]] || { echo "ocsb: $1 requires HOST_PATH:SANDBOX_PATH" >&2; exit 1; }
+          _MOUNT_FLAG="$1"
+          _MOUNT_SPEC="$2"
+          # Parse HOST:SANDBOX — split on first colon only
+          _MOUNT_HOST="''${_MOUNT_SPEC%%:*}"
+          _MOUNT_SANDBOX="''${_MOUNT_SPEC#*:}"
+          if [[ "$_MOUNT_SPEC" != *":"* ]]; then
+            echo "ocsb: $1 format must be HOST_PATH:SANDBOX_PATH" >&2
+            exit 1
+          fi
+          # Validate host path: must be absolute
+          if [[ "$_MOUNT_HOST" != /* ]]; then
+            echo "ocsb: host path must be absolute: $_MOUNT_HOST" >&2
+            exit 1
+          fi
+          # Validate host path: must exist
+          if [[ ! -e "$_MOUNT_HOST" ]]; then
+            echo "ocsb: host path does not exist: $_MOUNT_HOST" >&2
+            exit 1
+          fi
+          # Validate sandbox path: reject '..' components
+          if [[ "$_MOUNT_SANDBOX" == *".."* ]]; then
+            echo "ocsb: sandbox path cannot contain '..': $_MOUNT_SANDBOX" >&2
+            exit 1
+          fi
+          # Resolve sandbox path: relative → /workspace/...
+          if [[ "$_MOUNT_SANDBOX" == "./"* ]]; then
+            _MOUNT_SANDBOX="/workspace/''${_MOUNT_SANDBOX:2}"
+          elif [[ "$_MOUNT_SANDBOX" != /* ]]; then
+            _MOUNT_SANDBOX="/workspace/$_MOUNT_SANDBOX"
+          fi
+          # Add to runtime mounts
+          if [[ "$_MOUNT_FLAG" == "--ro" ]]; then
+            RUNTIME_MOUNTS+=(--ro-bind "$_MOUNT_HOST" "$_MOUNT_SANDBOX")
+          else
+            RUNTIME_MOUNTS+=(--bind "$_MOUNT_HOST" "$_MOUNT_SANDBOX")
+          fi
+          shift 2 ;;
         --)
           shift; break ;;
         -*)
@@ -382,19 +487,30 @@ let
     # =========================================================
     BWRAP_ARGS=(
       --unshare-all
-      --share-net
+      ${lib.optionalString (networkMode == "host") "--share-net"}
       --die-with-parent
       --new-session
       --clearenv
 
+      ${if networkMode == "filtered" then ''
+      # Filtered mode: uid 0 for CAP_NET_ADMIN (iptables best-effort).
+      # uid 0 inside a user namespace has NO host privileges.
+      --uid 0
+      --gid 0
+      '' else ''
       --uid "$(${pkgs.coreutils}/bin/id -u)"
       --gid "$(${pkgs.coreutils}/bin/id -g)"
-
+      ''}
       --dev /dev
       --proc /proc
       --tmpfs /tmp
+      --tmpfs /run
 
-      --ro-bind-try /etc/resolv.conf /etc/resolv.conf
+      ${if networkMode == "filtered" then
+        ''--ro-bind "${customResolvConf}" /etc/resolv.conf''
+      else
+        "--ro-bind-try /etc/resolv.conf /etc/resolv.conf"
+      }
       --ro-bind-try /etc/ssl /etc/ssl
       --ro-bind-try /etc/static/ssl /etc/static/ssl
       --ro-bind-try /etc/nix /etc/nix
@@ -425,8 +541,13 @@ let
     # User-configured read-write mounts
     ${mkMountArrayEntries "--bind-try" cfg.mounts.rw}
 
-    # Workspace strategy mounts
+    # Workspace strategy mounts (must come before runtime mounts so /workspace exists)
     BWRAP_ARGS+=("''${STRATEGY_FLAGS[@]}")
+
+    # Runtime CLI mounts (--ro / --rw flags) — after strategy so /workspace is available
+    if [[ ''${#RUNTIME_MOUNTS[@]} -gt 0 ]]; then
+      BWRAP_ARGS+=("''${RUNTIME_MOUNTS[@]}")
+    fi
 
     # Git metadata mounts (for gitfile-backed repos)
     if [[ ''${#GIT_METADATA_FLAGS[@]} -gt 0 ]]; then
@@ -435,12 +556,14 @@ let
 
     # Environment
     BWRAP_ARGS+=(
-      --setenv HOME /home/sandbox
-      --setenv PATH /usr/bin
-      --setenv TERM "''${TERM:-xterm-256color}"
-      --setenv SANDBOX 1
+  --setenv HOME /home/sandbox
+  --setenv PATH /usr/bin
+  --setenv TERM "''${TERM:-xterm-256color}"
+  --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+  --setenv SANDBOX 1
       --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
       --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
+      --setenv OCSB_NETWORK "${networkMode}"
     )
     ${envSetenvEntries}
 
@@ -450,9 +573,66 @@ let
     )
 
     # =========================================================
+    # Determine sandbox command
+    # =========================================================
+    SANDBOX_CMD=()
+    ${if cfg.app.package != null then ''
+    SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
+    '' else ''
+    if [[ $# -gt 0 ]]; then
+      if [[ "$1" == -* ]]; then
+        SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
+      else
+        SANDBOX_CMD=("$@")
+      fi
+    else
+      SANDBOX_CMD=(${lib.escapeShellArg appExec})
+    fi
+    ''}
+
+    # =========================================================
     # Exec bwrap
     # =========================================================
-    exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- ${lib.escapeShellArg appExec} "$@"
+    ${if networkMode == "filtered" then ''
+    _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
+    _BWRAP_PID=""
+    _SLIRP_PID=""
+
+    _cleanup_net() {
+      [[ -n "$_BWRAP_PID" ]] && kill "$_BWRAP_PID" 2>/dev/null || true
+      [[ -n "$_SLIRP_PID" ]] && kill "$_SLIRP_PID" 2>/dev/null || true
+      ${pkgs.coreutils}/bin/rm -rf "$_NET_TMP"
+    }
+    trap _cleanup_net EXIT
+
+    ${pkgs.coreutils}/bin/mkfifo "$_NET_TMP/info"
+
+    (
+      exec ${pkgs.bubblewrap}/bin/bwrap \
+        "''${BWRAP_ARGS[@]}" \
+        --info-fd 3 \
+        -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
+        3>"$_NET_TMP/info"
+    ) &
+    _BWRAP_PID=$!
+
+    _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || {
+      >&2 echo "ocsb: failed to start sandbox with network filtering"
+      exit 1
+    }
+
+    ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0 &
+    _SLIRP_PID=$!
+
+    set +e
+    wait "$_BWRAP_PID"
+    _BWRAP_RC=$?
+    _BWRAP_PID=""
+    exit $_BWRAP_RC
+    '' else ''
+    # Simple exec: host network or no network
+    exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
+    ''}
   '';
 
 in

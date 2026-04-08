@@ -202,6 +202,109 @@ assert "malformed .git does not mount arbitrary dirs" [ "$OUTPUT" = "BLOCKED" ]
 rm -rf "$GITFAKE_PROJECT" "$GITFAKE_TARGET"
 echo ""
 
+# --- CLI args passthrough ---
+echo "--- CLI args passthrough ---"
+
+# When app.package=null (bash mode), args after -- become the command
+ECHO_OUTPUT=$("$OCSB_BIN" -w "test-passthrough" --strategy direct --overwrite -- echo hello-ocsb)
+assert "passthrough: -- echo hello-ocsb outputs hello-ocsb" [ "$ECHO_OUTPUT" = "hello-ocsb" ]
+
+# Multiple args passthrough
+MULTI_OUTPUT=$("$OCSB_BIN" -w "test-passthrough2" --strategy direct --overwrite -- echo "arg1 arg2")
+assert "passthrough: multiple args forwarded" [ "$MULTI_OUTPUT" = "arg1 arg2" ]
+
+# No args after -- → drops to bash; test with -c flag
+BASH_OUTPUT=$("$OCSB_BIN" -w "test-passthrough3" --strategy direct --overwrite -- -c 'echo from-bash')
+assert "passthrough: -c flag works in bash mode" [ "$BASH_OUTPUT" = "from-bash" ]
+
+echo ""
+
+# --- Runtime mounts (--ro / --rw) ---
+echo "--- runtime mounts ---"
+
+# Create temp dirs for mount testing
+MOUNT_SRC_RO="$(mktemp -d)"
+MOUNT_SRC_RW="$(mktemp -d)"
+echo "ro-marker-$$" > "$MOUNT_SRC_RO/marker.txt"
+echo "rw-marker-$$" > "$MOUNT_SRC_RW/marker.txt"
+
+# --ro mount: host dir → sandbox path (relative resolves to /workspace/...)
+RO_OUTPUT=$("$OCSB_BIN" -w "test-mount-ro" --strategy direct --overwrite \
+  --ro "$MOUNT_SRC_RO:./ro-data" \
+  -- cat /workspace/ro-data/marker.txt)
+assert "--ro mount: file accessible at /workspace/ro-data" [ "$RO_OUTPUT" = "ro-marker-$$" ]
+
+# --ro mount is read-only
+RO_WRITE=$("$OCSB_BIN" -w "test-mount-ro2" --strategy direct --overwrite \
+  --ro "$MOUNT_SRC_RO:./ro-test" \
+  -- -c 'echo fail > /workspace/ro-test/write_test 2>&1 && echo WRITABLE || echo READONLY')
+assert "--ro mount is read-only" [ "$RO_WRITE" = "READONLY" ]
+
+# --rw mount: writable
+RW_OUTPUT=$("$OCSB_BIN" -w "test-mount-rw" --strategy direct --overwrite \
+  --rw "$MOUNT_SRC_RW:./rw-data" \
+  -- -c 'echo "written-$$" > /workspace/rw-data/new_file.txt && cat /workspace/rw-data/new_file.txt')
+assert "--rw mount: write works" test -n "$RW_OUTPUT"
+
+# --ro with absolute sandbox path
+ABS_OUTPUT=$("$OCSB_BIN" -w "test-mount-abs" --strategy direct --overwrite \
+  --ro "$MOUNT_SRC_RO:/data/ro-abs" \
+  -- cat /data/ro-abs/marker.txt)
+assert "--ro mount: absolute sandbox path works" [ "$ABS_OUTPUT" = "ro-marker-$$" ]
+
+# Validation: reject relative host path
+assert_fails "--ro rejects relative host path" \
+  "$OCSB_BIN" -w "test-mount-bad" --strategy direct --overwrite \
+  --ro "relative/path:./dest" -- -c true
+
+# Validation: reject '..' in sandbox path
+assert_fails "--ro rejects '..' in sandbox path" \
+  "$OCSB_BIN" -w "test-mount-bad2" --strategy direct --overwrite \
+  --ro "$MOUNT_SRC_RO:../escape" -- -c true
+
+# Validation: reject non-existent host path
+assert_fails "--ro rejects non-existent host path" \
+  "$OCSB_BIN" -w "test-mount-bad3" --strategy direct --overwrite \
+  --ro "/nonexistent/path:./dest" -- -c true
+
+# Validation: reject missing colon separator
+assert_fails "--ro rejects missing colon separator" \
+  "$OCSB_BIN" -w "test-mount-bad4" --strategy direct --overwrite \
+  --ro "$MOUNT_SRC_RO" -- -c true
+
+rm -rf "$MOUNT_SRC_RO" "$MOUNT_SRC_RW"
+echo ""
+
+# --- OpenCode db rw mount ---
+echo "--- opencode db rw mount ---"
+
+# The template mounts ~/.local/share/opencode as rw (bind-try).
+# Create marker on host, verify writable inside sandbox.
+OC_DB_DIR="$HOME/.local/share/opencode"
+mkdir -p "$OC_DB_DIR"
+echo "oc-db-test-$$" > "$OC_DB_DIR/.ocsb_db_test"
+
+DB_OUTPUT=$("$OCSB_BIN" -w "test-ocdb" --strategy direct --overwrite -- \
+  -c 'cat /home/sandbox/.local/share/opencode/.ocsb_db_test 2>/dev/null || echo MISSING')
+assert "opencode db: marker readable" [ "$DB_OUTPUT" = "oc-db-test-$$" ]
+
+# Verify writability
+DB_WRITE=$("$OCSB_BIN" -w "test-ocdb-w" --strategy direct --overwrite -- \
+  -c 'echo write-test > /home/sandbox/.local/share/opencode/.ocsb_write_test 2>/dev/null && echo OK || echo READONLY')
+assert "opencode db: path is writable" [ "$DB_WRITE" = "OK" ]
+
+rm -f "$OC_DB_DIR/.ocsb_db_test" "$OC_DB_DIR/.ocsb_write_test"
+echo ""
+
+# --- OCSB_NETWORK env var ---
+echo "--- OCSB_NETWORK env var ---"
+
+NET_OUTPUT=$("$OCSB_BIN" -w "test-netenv" --strategy direct --overwrite -- \
+  -c 'echo $OCSB_NETWORK')
+assert "OCSB_NETWORK set to 'host' by default" [ "$NET_OUTPUT" = "host" ]
+
+echo ""
+
 echo "=== Wrapper Results: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
   exit 1

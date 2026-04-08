@@ -7,5 +7,6 @@
     ./mounts.nix
     ./workspace.nix
     ./env.nix
+    ./network.nix
   ];
 }

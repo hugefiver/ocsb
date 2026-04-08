@@ -34,11 +34,11 @@
   mounts.ro = [
     # Common config paths — silently skipped if absent (--ro-bind-try)
     "~/.config/opencode"
-    "~/.local/share/opencode"
   ];
 
   mounts.rw = [
-    # Add paths that need write access here
+    # OpenCode SQLite database needs write access for sessions/conversations
+    "~/.local/share/opencode"
   ];
 
   workspace = {
