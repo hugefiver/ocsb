@@ -14,7 +14,11 @@
         Network isolation mode:
         - null (default): share host network stack (no isolation)
         - true: filtered internet via slirp4netns — public internet accessible,
-          private/link-local ranges blocked by iptables
+          private/link-local ranges blocked by iptables (best-effort: requires
+          kernel netfilter support in user namespaces). When iptables is
+          unavailable, isolation is still provided by network namespace +
+          slirp4netns --disable-host-loopback. When iptables IS available but
+          rules fail to apply, the sandbox aborts (fail-closed).
         - false: no network connectivity at all
       '';
     };
@@ -32,6 +36,8 @@
         Default: RFC1918 private ranges + link-local.
         The slirp4netns virtual subnet (10.0.2.0/24) is automatically
         exempted so that the NAT gateway and DNS continue to work.
+        When iptables is available, ALL ranges are verified after
+        installation — if any rule fails, the sandbox aborts.
       '';
     };
   };

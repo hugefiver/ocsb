@@ -43,7 +43,8 @@ let
     rootPaths =
       [ sandboxBin pkgs.bubblewrap pkgs.cacert ]
       ++ lib.optional (cfg.app.package != null) cfg.app.package
-      ++ lib.optional (networkMode == "filtered") networkSetupScript
+      ++ lib.optional (networkMode == "filtered" && !dualLayerEnabled) networkSetupScript
+      ++ lib.optional dualLayerEnabled sandboxShell
       ;
   };
 
@@ -80,6 +81,11 @@ let
     else if cfg.network.enable == false then "blocked"
     else "host";
 
+  # --- Dual-layer mode (experimental) ---
+  # When enabled: outer sandbox has host network, inner sandbox (per-command)
+  # has full isolation (--unshare-all).  Overrides network.enable.
+  dualLayerEnabled = cfg.experimental.dualLayer;
+
   # Custom resolv.conf for slirp4netns (points to its virtual DNS at 10.0.2.3)
   customResolvConf = pkgs.writeText "ocsb-resolv.conf" "nameserver 10.0.2.3\n";
 
@@ -111,13 +117,17 @@ let
 
       if [ -n "$_IPTABLES" ]; then
         "$_IPTABLES" -A OUTPUT -d 10.0.2.0/24 -j ACCEPT || true
-        ${lib.concatMapStringsSep "\n"
+        ${lib.concatMapStringsSep "\n        "
           (range: ''"$_IPTABLES" -A OUTPUT -d ${lib.escapeShellArg range} -j DROP || true'')
           cfg.network.blockedRanges}
-        # Verify at least one DROP rule was installed (fail closed)
+        # Verify ALL blocked ranges were installed (fail closed)
         ${lib.optionalString (cfg.network.blockedRanges != []) ''
-        if ! "$_IPTABLES" -C OUTPUT -d ${lib.escapeShellArg (builtins.head cfg.network.blockedRanges)} -j DROP 2>/dev/null; then
-          echo "ocsb: error: iptables available but firewall rules failed to apply — aborting" >&2
+        _RULES_OK=1
+        ${lib.concatMapStringsSep "\n        "
+          (range: ''if ! "$_IPTABLES" -C OUTPUT -d ${lib.escapeShellArg range} -j DROP 2>/dev/null; then _RULES_OK=0; fi'')
+          cfg.network.blockedRanges}
+        if [ "$_RULES_OK" -ne 1 ]; then
+          echo "ocsb: error: iptables available but not all firewall rules could be verified — aborting" >&2
           exit 1
         fi
         ''}
@@ -135,6 +145,76 @@ let
       fi
       exec "$@"
     '';
+
+  # --- Dual-layer: inner sandbox shell wrapper ---
+  # Drop-in $SHELL replacement that wraps EVERY invocation in a nested bwrap
+  # with --unshare-all (no network, isolated namespaces).
+  # Only --version/--help pass through to real bash (for shell detection).
+  # NOTE: -h is NOT help — it's bash's hashall option and MUST be sandboxed.
+  # Only built when experimental.dualLayer = true.
+  sandboxShell = pkgs.writeShellScript "${cfg.app.name}-sandbox-shell" ''
+    # Pass-through queries for shell detection (opencode checks $SHELL --version)
+    # Only long-form info flags that print and exit. No short flags — they
+    # can combine with -c to execute arbitrary commands unsandboxed.
+    case "''${1:-}" in
+      --version|--help)
+        exec ${sandboxBin}/bin/bash "$@"
+        ;;
+    esac
+
+    # All other invocations are wrapped in inner bwrap (full isolation)
+    _INNER_ARGS=(
+      --unshare-all
+      --die-with-parent
+      --new-session
+      --uid 0 --gid 0
+      --dev /dev
+      --proc /proc
+      --tmpfs /tmp
+      --tmpfs /run
+      --tmpfs /home
+      --dir /home/sandbox
+    )
+    # Mount each store path from the outer sandbox individually.
+    # The outer sandbox only has closure paths mounted, so this
+    # naturally restricts the inner sandbox to the same set.
+    for _store_path in /nix/store/*; do
+      _INNER_ARGS+=(--ro-bind "$_store_path" "$_store_path")
+    done
+    _INNER_ARGS+=(
+      --ro-bind /usr/bin /usr/bin
+      --symlink /usr/bin /bin
+      --symlink usr/lib /lib
+      --symlink usr/lib64 /lib64
+      --bind /workspace /workspace
+      --ro-bind-try /etc/passwd /etc/passwd
+      --ro-bind-try /etc/group /etc/group
+      --clearenv
+      --setenv HOME /home/sandbox
+      --setenv PATH /usr/bin
+      --setenv TERM "''${TERM:-xterm-256color}"
+      --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      --setenv SANDBOX 1
+      --setenv OCSB_DUAL_LAYER inner
+      --chdir "$(pwd)"
+    )
+
+    # Route by invocation form — all go through inner bwrap
+    case "''${1:-}" in
+      -c)
+        shift
+        exec ${pkgs.bubblewrap}/bin/bwrap "''${_INNER_ARGS[@]}" -- ${sandboxBin}/bin/bash -c "$@"
+        ;;
+      "")
+        # Interactive shell (no args)
+        exec ${pkgs.bubblewrap}/bin/bwrap "''${_INNER_ARGS[@]}" -- ${sandboxBin}/bin/bash
+        ;;
+      *)
+        # All other forms: flags (-l, --login, -lc), scripts, etc.
+        exec ${pkgs.bubblewrap}/bin/bwrap "''${_INNER_ARGS[@]}" -- ${sandboxBin}/bin/bash "$@"
+        ;;
+    esac
+  '';
 
   # --- Launcher script ---
   launcher = pkgs.writeShellScript "${cfg.app.name}-launcher" ''
@@ -465,19 +545,32 @@ let
         ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --absolute-git-dir 2>/dev/null)" || _GITDIR_PATH=""
 
       if [[ -n "$_GITDIR_PATH" ]] && [[ -d "$_GITDIR_PATH" ]]; then
-        _GIT_BIND="--ro-bind"
-        [[ "$WORKSPACE_STRATEGY" == "git-worktree" ]] && _GIT_BIND="--bind"
+        # Security: constrain git metadata to project root boundary
+        _GITDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH")"
+        if [[ "$_GITDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_GITDIR_REAL" != "$PROJECT_DIR" ]]; then
+          echo "ocsb: warning: git metadata path escapes project root, skipping: $_GITDIR_PATH" >&2
+        else
+          _GIT_BIND="--ro-bind"
+          [[ "$WORKSPACE_STRATEGY" == "git-worktree" ]] && _GIT_BIND="--bind"
 
-        GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_GITDIR_PATH" "$_GITDIR_PATH")
+          # Use canonical path as bind source to prevent TOCTOU symlink-swap attacks
+          GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_GITDIR_REAL" "$_GITDIR_REAL")
 
-        # Mount common dir if different from git dir (linked worktrees)
-        _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-          ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --git-common-dir 2>/dev/null)" || _COMMONDIR_PATH=""
-        if [[ -n "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != /* ]]; then
-          _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH/$_COMMONDIR_PATH")"
-        fi
-        if [[ -n "$_COMMONDIR_PATH" ]] && [[ -d "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != "$_GITDIR_PATH" ]]; then
-          GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_COMMONDIR_PATH" "$_COMMONDIR_PATH")
+          # Mount common dir if different from git dir (linked worktrees)
+          _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+            ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --git-common-dir 2>/dev/null)" || _COMMONDIR_PATH=""
+          if [[ -n "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != /* ]]; then
+            _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH/$_COMMONDIR_PATH")"
+          fi
+          if [[ -n "$_COMMONDIR_PATH" ]] && [[ -d "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != "$_GITDIR_PATH" ]]; then
+            _COMMONDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_COMMONDIR_PATH")"
+            if [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR" ]]; then
+              echo "ocsb: warning: git common-dir escapes project root, skipping: $_COMMONDIR_PATH" >&2
+            else
+              # Use canonical path as bind source to prevent TOCTOU symlink-swap attacks
+              GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_COMMONDIR_REAL" "$_COMMONDIR_REAL")
+            fi
+          fi
         fi
       fi
     fi
@@ -487,12 +580,12 @@ let
     # =========================================================
     BWRAP_ARGS=(
       --unshare-all
-      ${lib.optionalString (networkMode == "host") "--share-net"}
+      ${lib.optionalString (networkMode == "host" || dualLayerEnabled) "--share-net"}
       --die-with-parent
       --new-session
       --clearenv
 
-      ${if networkMode == "filtered" then ''
+      ${if networkMode == "filtered" && !dualLayerEnabled then ''
       # Filtered mode: uid 0 for CAP_NET_ADMIN (iptables best-effort).
       # uid 0 inside a user namespace has NO host privileges.
       --uid 0
@@ -506,7 +599,7 @@ let
       --tmpfs /tmp
       --tmpfs /run
 
-      ${if networkMode == "filtered" then
+      ${if networkMode == "filtered" && !dualLayerEnabled then
         ''--ro-bind "${customResolvConf}" /etc/resolv.conf''
       else
         "--ro-bind-try /etc/resolv.conf /etc/resolv.conf"
@@ -563,7 +656,9 @@ let
   --setenv SANDBOX 1
       --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
       --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
-      --setenv OCSB_NETWORK "${networkMode}"
+      --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
+      ${lib.optionalString dualLayerEnabled ''--setenv SHELL "${sandboxShell}"''}
+      ${lib.optionalString dualLayerEnabled ''--setenv OCSB_DUAL_LAYER outer''}
     )
     ${envSetenvEntries}
 
@@ -593,7 +688,7 @@ let
     # =========================================================
     # Exec bwrap
     # =========================================================
-    ${if networkMode == "filtered" then ''
+    ${if networkMode == "filtered" && !dualLayerEnabled then ''
     _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
     _BWRAP_PID=""
     _SLIRP_PID=""

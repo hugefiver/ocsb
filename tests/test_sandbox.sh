@@ -69,7 +69,12 @@ echo "--- /nix/store isolation ---"
 # Count store paths visible — should be a limited set, not the full store
 STORE_COUNT=$(ls -1d /nix/store/*/ 2>/dev/null | wc -l)
 assert "/nix/store has limited paths (< 500)" [ "$STORE_COUNT" -lt 500 ]
+assert "/nix/store has some paths (> 0)" [ "$STORE_COUNT" -gt 0 ]
 echo "  (visible store paths: $STORE_COUNT)"
+_BASH_REAL="$(readlink -f "$(command -v bash)" 2>/dev/null)"
+_IN_STORE=0
+case "$_BASH_REAL" in /nix/store/*) _IN_STORE=1 ;; esac
+assert "bash resolves to /nix/store path" [ "$_IN_STORE" = "1" ]
 echo ""
 
 # --- Filesystem isolation ---
