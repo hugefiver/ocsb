@@ -296,6 +296,55 @@ assert "opencode db: path is writable" [ "$DB_WRITE" = "OK" ]
 rm -f "$OC_DB_DIR/.ocsb_db_test" "$OC_DB_DIR/.ocsb_write_test"
 echo ""
 
+# --- Auto strategy ---
+echo "--- auto strategy ---"
+
+# On non-btrfs, auto should resolve to overlayfs
+AUTO_STRAT=$("$OCSB_BIN" -w "test-auto" --strategy auto --overwrite -- \
+  -c 'echo $OCSB_STRATEGY' 2>/dev/null)
+# Accept both btrfs and overlayfs depending on filesystem
+assert "auto strategy resolves to overlayfs or btrfs" \
+  [ "$AUTO_STRAT" = "overlayfs" ] || [ "$AUTO_STRAT" = "btrfs" ]
+
+# Default strategy (no --strategy flag) should also be auto
+DEFAULT_STRAT=$("$OCSB_BIN" -w "test-default-strat" --overwrite -- \
+  -c 'echo $OCSB_STRATEGY' 2>/dev/null)
+assert "default strategy resolves (auto)" \
+  [ "$DEFAULT_STRAT" = "overlayfs" ] || [ "$DEFAULT_STRAT" = "btrfs" ]
+
+echo ""
+
+# --- Per-directory overlay mount ---
+echo "--- per-directory overlay mount ---"
+
+OVL_SRC="$(mktemp -d)"
+echo "overlay-test-data" > "$OVL_SRC/marker.txt"
+
+OVL_OUTPUT=$("$OCSB_BIN" -w "test-ovl-mount" --strategy direct --overwrite \
+  --overlay-mount "$OVL_SRC:/workspace/ovl-test" -- \
+  -c 'cat /workspace/ovl-test/marker.txt 2>/dev/null || echo MISSING')
+assert "overlay-mount: source data readable" [ "$OVL_OUTPUT" = "overlay-test-data" ]
+
+# Writes to overlay should not modify source
+"$OCSB_BIN" -w "test-ovl-mount" --strategy direct --continue \
+  --overlay-mount "$OVL_SRC:/workspace/ovl-test" -- \
+  -c 'echo modified > /workspace/ovl-test/marker.txt' 2>/dev/null || true
+OVL_ORIG="$(cat "$OVL_SRC/marker.txt")"
+assert "overlay-mount: source not modified by writes" [ "$OVL_ORIG" = "overlay-test-data" ]
+
+# Validation: relative host path rejected
+assert_fails "overlay-mount rejects relative host path" \
+  "$OCSB_BIN" -w "test-ovl-bad" --strategy direct --overwrite \
+  --overlay-mount "relative/path:/workspace/test" -- -c true
+
+# Validation: missing host path rejected
+assert_fails "overlay-mount rejects nonexistent host path" \
+  "$OCSB_BIN" -w "test-ovl-bad2" --strategy direct --overwrite \
+  --overlay-mount "/nonexistent/dir123:/workspace/test" -- -c true
+
+rm -rf "$OVL_SRC"
+echo ""
+
 # --- OCSB_NETWORK env var ---
 echo "--- OCSB_NETWORK env var ---"
 

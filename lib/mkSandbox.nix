@@ -255,6 +255,8 @@ let
     CONTINUE=0
     OVERWRITE=0
     RUNTIME_MOUNTS=()
+    OVERLAY_MOUNTS=()
+    SNAP_MOUNTS=()
 
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -305,6 +307,39 @@ let
             RUNTIME_MOUNTS+=(--ro-bind "$_MOUNT_HOST" "$_MOUNT_SANDBOX")
           else
             RUNTIME_MOUNTS+=(--bind "$_MOUNT_HOST" "$_MOUNT_SANDBOX")
+          fi
+          shift 2 ;;
+        --overlay-mount|--snap-mount)
+          [[ $# -ge 2 ]] || { echo "ocsb: $1 requires HOST_PATH:SANDBOX_PATH" >&2; exit 1; }
+          _DM_FLAG="$1"
+          _DM_SPEC="$2"
+          _DM_HOST="''${_DM_SPEC%%:*}"
+          _DM_SANDBOX="''${_DM_SPEC#*:}"
+          if [[ "$_DM_SPEC" != *":"* ]]; then
+            echo "ocsb: $1 format must be HOST_PATH:SANDBOX_PATH" >&2
+            exit 1
+          fi
+          if [[ "$_DM_HOST" != /* ]]; then
+            echo "ocsb: host path must be absolute: $_DM_HOST" >&2
+            exit 1
+          fi
+          if [[ ! -d "$_DM_HOST" ]]; then
+            echo "ocsb: host path must be an existing directory: $_DM_HOST" >&2
+            exit 1
+          fi
+          if [[ "$_DM_SANDBOX" == *".."* ]]; then
+            echo "ocsb: sandbox path cannot contain '..': $_DM_SANDBOX" >&2
+            exit 1
+          fi
+          if [[ "$_DM_SANDBOX" == "./"* ]]; then
+            _DM_SANDBOX="/workspace/''${_DM_SANDBOX:2}"
+          elif [[ "$_DM_SANDBOX" != /* ]]; then
+            _DM_SANDBOX="/workspace/$_DM_SANDBOX"
+          fi
+          if [[ "$_DM_FLAG" == "--overlay-mount" ]]; then
+            OVERLAY_MOUNTS+=("$_DM_HOST" "$_DM_SANDBOX")
+          else
+            SNAP_MOUNTS+=("$_DM_HOST" "$_DM_SANDBOX")
           fi
           shift 2 ;;
         --)
@@ -360,12 +395,25 @@ let
 
     # Validate strategy before creating any state
     case "$WORKSPACE_STRATEGY" in
-      overlayfs|btrfs|git-worktree|direct) ;;
+      auto|overlayfs|btrfs|git-worktree|direct) ;;
       *)
         echo "ocsb: unknown strategy: $WORKSPACE_STRATEGY" >&2
         exit 1
         ;;
     esac
+
+    # =========================================================
+    # Auto-detect: resolve 'auto' to btrfs or overlayfs
+    # =========================================================
+    if [[ "$WORKSPACE_STRATEGY" == "auto" ]]; then
+      if ${pkgs.btrfs-progs}/bin/btrfs subvolume show "$PROJECT_DIR" &>/dev/null 2>&1; then
+        WORKSPACE_STRATEGY="btrfs"
+        echo "ocsb: auto-detected btrfs filesystem, using btrfs snapshot strategy" >&2
+      else
+        WORKSPACE_STRATEGY="overlayfs"
+        echo "ocsb: filesystem is not btrfs, using overlayfs strategy" >&2
+      fi
+    fi
 
     # =========================================================
     # Workspace directory setup
@@ -432,6 +480,15 @@ let
         esac
         ${pkgs.coreutils}/bin/rm -rf "$WS_DIR"
         ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
+        # Clean per-directory overlay and snapshot state
+        for _d in "$OVERLAY_STATE_DIR"/ovl-*; do
+          [[ -d "$_d" ]] && ${pkgs.coreutils}/bin/rm -rf "$_d"
+        done
+        for _d in "$OVERLAY_STATE_DIR"/snap-*; do
+          if [[ -d "$_d" ]]; then
+            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_d" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_d"
+          fi
+        done
       elif [[ "$CONTINUE" -eq 1 ]]; then
         # Verify strategy matches what workspace was created with
         if [[ -f "$OVERLAY_STATE_DIR/.strategy" ]]; then
@@ -641,6 +698,43 @@ let
     if [[ ''${#RUNTIME_MOUNTS[@]} -gt 0 ]]; then
       BWRAP_ARGS+=("''${RUNTIME_MOUNTS[@]}")
     fi
+
+    # Per-directory overlay mounts (--overlay-mount HOST:SANDBOX)
+    _OVL_IDX=0
+    while [[ $_OVL_IDX -lt ''${#OVERLAY_MOUNTS[@]} ]]; do
+      _OVL_HOST="''${OVERLAY_MOUNTS[$_OVL_IDX]}"
+      _OVL_SANDBOX="''${OVERLAY_MOUNTS[$_OVL_IDX+1]}"
+      _OVL_HASH="$(echo -n "$_OVL_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
+      _OVL_STATE="$OVERLAY_STATE_DIR/ovl-$_OVL_HASH"
+      ${pkgs.coreutils}/bin/mkdir -p "$_OVL_STATE/upper" "$_OVL_STATE/work"
+      BWRAP_ARGS+=(--overlay-src "$_OVL_HOST" --overlay "$_OVL_STATE/upper" "$_OVL_STATE/work" "$_OVL_SANDBOX")
+      echo "ocsb: overlay mount $_OVL_HOST -> $_OVL_SANDBOX (state: $_OVL_STATE)" >&2
+      _OVL_IDX=$((_OVL_IDX + 2))
+    done
+
+    # Per-directory snapshot mounts (--snap-mount HOST:SANDBOX)
+    _SNAP_IDX=0
+    while [[ $_SNAP_IDX -lt ''${#SNAP_MOUNTS[@]} ]]; do
+      _SNAP_HOST="''${SNAP_MOUNTS[$_SNAP_IDX]}"
+      _SNAP_SANDBOX="''${SNAP_MOUNTS[$_SNAP_IDX+1]}"
+      _SNAP_HASH="$(echo -n "$_SNAP_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
+      _SNAP_DIR="$OVERLAY_STATE_DIR/snap-$_SNAP_HASH"
+      if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$_SNAP_DIR" ]]; then
+        echo "ocsb: reusing snapshot $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
+      else
+        if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume show "$_SNAP_HOST" &>/dev/null; then
+          echo "ocsb: error: --snap-mount source must be a btrfs subvolume: $_SNAP_HOST" >&2
+          exit 1
+        fi
+        if [[ -d "$_SNAP_DIR" ]]; then
+          ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_SNAP_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_SNAP_DIR"
+        fi
+        ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$_SNAP_HOST" "$_SNAP_DIR"
+        echo "ocsb: snapshot mount $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
+      fi
+      BWRAP_ARGS+=(--bind "$_SNAP_DIR" "$_SNAP_SANDBOX")
+      _SNAP_IDX=$((_SNAP_IDX + 2))
+    done
 
     # Git metadata mounts (for gitfile-backed repos)
     if [[ ''${#GIT_METADATA_FLAGS[@]} -gt 0 ]]; then

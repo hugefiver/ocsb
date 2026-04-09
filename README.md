@@ -43,6 +43,12 @@ nix build github:hugefiver/ocsb
 # Ad-hoc mounts
 ./result/bin/ocsb --ro ~/data:/workspace/data --rw /tmp/out:/workspace/out
 
+# Per-directory overlay mount (CoW isolation for a specific directory)
+./result/bin/ocsb --overlay-mount /data/models:/workspace/models
+
+# Per-directory btrfs snapshot mount (requires btrfs source)
+./result/bin/ocsb --snap-mount /data/datasets:/workspace/datasets
+
 # Run a command directly
 ./result/bin/ocsb -- echo "hello from sandbox"
 ```
@@ -115,7 +121,7 @@ nix build github:hugefiver/ocsb
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `workspace.strategy` | enum | `"overlayfs"` | `overlayfs`, `btrfs`, `git-worktree`, or `direct` |
+| `workspace.strategy` | enum | `"auto"` | `auto` (detect btrfs, fallback overlayfs), `overlayfs`, `btrfs`, `git-worktree`, or `direct` |
 | `workspace.baseDir` | string | `".ocsb"` | Base directory for workspaces (relative to project) |
 | `workspace.name` | string | `"_"` | Default workspace name |
 
@@ -161,10 +167,18 @@ When `experimental.dualLayer = true`:
 
 ## Workspace Strategies
 
-- **overlayfs** — overlay filesystem with project as lower, changes at `~/.cache/ocsb/<hash>/<name>/upper`. Default.
+- **auto** (default) — detects filesystem at runtime: uses btrfs snapshot if project is on a btrfs subvolume, otherwise falls back to overlayfs.
+- **overlayfs** — overlay filesystem with project as lower, changes at `~/.cache/ocsb/<hash>/<name>/upper`.
 - **btrfs** — btrfs subvolume snapshot. Requires btrfs filesystem.
 - **git-worktree** — detached git worktree. Requires git repository. Git operations work inside sandbox.
 - **direct** — bind-mounts project directory directly (no isolation).
+
+### Per-Directory Mounts
+
+In addition to the workspace strategy, you can mount specific host directories with CoW isolation:
+
+- `--overlay-mount HOST:SANDBOX` — mounts a host directory into the sandbox using overlayfs (changes stored in `~/.cache/ocsb/`)
+- `--snap-mount HOST:SANDBOX` — mounts a host directory using a btrfs snapshot (requires source to be a btrfs subvolume)
 
 ## Tests
 

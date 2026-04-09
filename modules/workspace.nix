@@ -3,11 +3,12 @@
 {
   options.workspace = {
     strategy = lib.mkOption {
-      type = lib.types.enum [ "overlayfs" "btrfs" "git-worktree" "direct" ];
-      default = "overlayfs";
+      type = lib.types.enum [ "auto" "overlayfs" "btrfs" "git-worktree" "direct" ];
+      default = "auto";
       description = ''
         Workspace branching strategy:
-        - overlayfs: CoW via bwrap --overlay (works on ext2/3/4, default)
+        - auto: detect filesystem — use btrfs snapshot if available, otherwise overlayfs (default)
+        - overlayfs: CoW via bwrap --overlay (works on any filesystem)
         - btrfs: btrfs subvolume snapshots (requires btrfs filesystem)
         - git-worktree: git worktree based branching (requires git repo)
         - direct: plain read-write bind mount (no isolation)

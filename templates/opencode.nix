@@ -42,7 +42,7 @@
   ];
 
   workspace = {
-    strategy = "overlayfs";
+    strategy = "auto";  # detects btrfs, falls back to overlayfs
     baseDir = ".ocsb";
     name = "_";
   };
