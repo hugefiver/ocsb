@@ -69,6 +69,11 @@ pkgs.rustPlatform.buildRustPackage {
     pkgs.python3
   ];
 
+  # Skip cargo test in nix sandbox: ironclaw's test suite needs network,
+  # NEAR AI account env vars, and writable home — all unavailable here. Run
+  # the upstream test suite outside this derivation if needed.
+  doCheck = false;
+
   meta = with lib; {
     description = "NEAR AI Ironclaw runtime (v${version})";
     homepage = "https://github.com/nearai/ironclaw";
