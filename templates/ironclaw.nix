@@ -1,13 +1,11 @@
-{ pkgs, ironclaw-src ? null }:
+{ pkgs, ironclawPackage }:
 
 { ... }:
 
 {
   app = {
     name = "ironclaw";
-    package = pkgs.callPackage ../pkgs/ironclaw.nix (
-      if ironclaw-src != null then { inherit ironclaw-src; } else { }
-    );
+    package = ironclawPackage;
     binPath = "bin/ironclaw";
     preExecHook = ''
       set -euo pipefail

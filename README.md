@@ -184,29 +184,49 @@ In addition to the workspace strategy, you can mount specific host directories w
 
 This repository now includes an `ironclaw` template for running [NEAR AI Ironclaw](https://github.com/nearai/ironclaw) (Rust + PostgreSQL + pgvector) inside an isolated ocsb bubblewrap sandbox.
 
-- Package: `.#ironclaw`
-- Sandbox wrapper: `.#ironclaw-sandbox` (`result/bin/ocsb-ironclaw`)
+- Latest package: `.#ironclaw` / `.#ironclaw-sandbox` (`result/bin/ocsb-ironclaw`)
+- Versioned packages (last 3 releases tracked):
+  - `.#ironclaw_v0_26_0` / `.#ironclaw-sandbox_v0_26_0` (latest, alias of `.#ironclaw{,-sandbox}`)
+  - `.#ironclaw_v0_25_0` / `.#ironclaw-sandbox_v0_25_0`
+  - `.#ironclaw_v0_24_0` / `.#ironclaw-sandbox_v0_24_0`
+
+Each version has its own pinned `flake` input (`ironclaw-src`, `ironclaw-src-v0_25_0`, `ironclaw-src-v0_24_0`) and independent persistence root.
+
+#### Bumping to a new release
+
+1. Find the new tag on https://github.com/nearai/ironclaw/releases
+2. Demote the current `ironclaw-src` (latest) to a versioned input (e.g. `ironclaw-src-v0_26_0`).
+3. Drop the oldest versioned input (e.g. `ironclaw-src-v0_24_0`) so only the last 3 are tracked.
+4. Point `ironclaw-src` at the new tag: `github:nearai/ironclaw/ironclaw-vX.Y.Z`.
+5. Update `ironclawVersions` in `flake.nix` (latest first).
+6. `nix flake update ironclaw-src` (and the new versioned input).
+7. `nix flake check --no-build` — if a new release introduces git deps not in `pkgs/ironclaw.nix` `allOutputHashes`, add the new entries (run a build to discover the missing hashes; nix prints them).
 
 ### Persistence
 
-The ironclaw wrapper persists runtime state under:
+Per-version state under:
 
-- default: `~/.cache/ocsb/ironclaw/<workspace>/`
+- latest: `~/.cache/ocsb/ironclaw/<workspace>/`
+- versioned: `~/.cache/ocsb/ironclaw_v0_XX_X/<workspace>/`
 
-You can override persistence with either:
+Override with either:
 
 - `OCSB_IRONCLAW_PERSIST_DIR=/absolute/path`
 - `--persist-dir /absolute/path`
 
-The host-side wrapper bind-mounts persistence subdirectories into the sandbox (home, postgres data/run dirs, ironclaw data dir, nix-portable home) before launch.
+The host-side wrapper bind-mounts persistence subdirectories into the sandbox (home, postgres data/run dirs, ironclaw data dir, nix store dirs) before launch.
 
 ### Nix modes
 
 Select mode with `OCSB_IRONCLAW_NIX_MODE`:
 
-- `portable` (default, recommended) — uses `nix-portable`
-- `single-user` — keeps Nix state under `~/.local/nix`
-- `isolated-store` — reserved mode; currently requires manual `/nix/store` overlay setup (not auto-configured)
+- `single-user` (default) — keeps Nix state under `$HOME/.local/nix/{store,var}`. Pure user-mode, no daemon.
+- `isolated-store` — overlays a persistent upper layer over the closure-only `/nix/store`. Closest to "real Nix" while staying isolated from host.
+- `portable` — stub; requires adding `DavHau/nix-portable` as a flake input (not packaged in nixpkgs).
+
+A user-level `nix.conf` is generated at `$HOME/.config/nix/nix.conf` with:
+`experimental-features = nix-command flakes`, `build-users-group = ` (empty),
+`sandbox = false`, `cache.nixos.org` substituter, `accept-flake-config = true`.
 
 ### TUN integration
 

@@ -3,19 +3,43 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    # Track ironclaw releases. The "latest" alias (`ironclaw-src`) points at the
+    # newest tag we ship; older releases are pinned independently and remain
+    # buildable as `ironclaw_v0_25_0`, `ironclaw_v0_24_0`, etc. To bump:
+    #   1. Move `ironclaw-src` to the new release tag.
+    #   2. Add the previous tag here (e.g. ironclaw-src-v0_26_0) and register it
+    #      in `ironclawVersions` below.
+    #   3. Drop the oldest entry if the kept-window grows beyond 3 releases.
     ironclaw-src = {
-      # Pinned to nearai/ironclaw main HEAD as of 2026-04-22.
-      url = "github:nearai/ironclaw/9dcd8969a659f91f47f6d13d5bc5c5ff8f19f6d6";
+      url = "github:nearai/ironclaw/ironclaw-v0.26.0";
+      flake = false;
+    };
+    ironclaw-src-v0_25_0 = {
+      url = "github:nearai/ironclaw/23fe1826842be5ac50bbac729f29d9d0d3ec8847";
+      flake = false;
+    };
+    ironclaw-src-v0_24_0 = {
+      url = "github:nearai/ironclaw/9bb699e95b08d11af0459fab1b70d51ccd55cf20";
       flake = false;
     };
   };
 
-  outputs = { self, nixpkgs, ironclaw-src }:
+  outputs = inputs@{ self, nixpkgs, ironclaw-src, ironclaw-src-v0_25_0, ironclaw-src-v0_24_0, ... }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+      lib = nixpkgs.lib;
 
       mkPkgs = system: nixpkgs.legacyPackages.${system};
+
+      # Latest first. The first entry's package becomes the unversioned
+      # `ironclaw` / `ironclaw-sandbox` aliases.
+      ironclawVersions = [
+        { slug = "v0_26_0"; version = "0.26.0"; src = ironclaw-src; }
+        { slug = "v0_25_0"; version = "0.25.0"; src = ironclaw-src-v0_25_0; }
+        { slug = "v0_24_0"; version = "0.24.0"; src = ironclaw-src-v0_24_0; }
+      ];
     in
     {
       lib.mkSandbox = { system ? "x86_64-linux" }:
@@ -28,35 +52,38 @@
         let
           pkgs = mkPkgs system;
           mkSandbox = import ./lib/mkSandbox.nix { inherit pkgs; lib = nixpkgs.lib; };
-          ironclawPackage = pkgs.callPackage ./pkgs/ironclaw.nix {
-            inherit ironclaw-src;
+
+          mkIronclawPackage = { src, version, ... }: pkgs.callPackage ./pkgs/ironclaw.nix {
+            ironclaw-src = src;
+            inherit version;
           };
-          ironclawSandboxBase = mkSandbox (import ./templates/ironclaw.nix {
-            inherit pkgs ironclaw-src;
+
+          mkIronclawSandboxBase = ironclawPackage: mkSandbox (import ./templates/ironclaw.nix {
+            inherit pkgs ironclawPackage;
           });
-        in
-        {
-          default = mkSandbox (import ./templates/opencode.nix { inherit pkgs; });
 
-          ironclaw = ironclawPackage;
-
-          ironclaw-sandbox = pkgs.writeShellScriptBin "ocsb-ironclaw" ''
+          # `slug` is empty for the latest alias (-> `ocsb-ironclaw`,
+          # persist dir `~/.cache/ocsb/ironclaw/`). For non-latest builds
+          # `slug` becomes "_v0_25_0" so wrappers and persist dirs are
+          # distinct per version.
+          mkSandboxBin = { slug, ironclawSandboxBase }: pkgs.writeShellScriptBin "ocsb-ironclaw${slug}" ''
             set -euo pipefail
 
-            WORKSPACE_NAME="ironclaw"
+            VARIANT="ironclaw${slug}"
+            WORKSPACE_NAME="$VARIANT"
             PERSIST_DIR=""
             FILTERED_ARGS=()
 
             while [[ $# -gt 0 ]]; do
               case "$1" in
                 -w|--workspace)
-                  [[ $# -ge 2 ]] || { echo "ocsb-ironclaw: $1 requires a value" >&2; exit 1; }
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
                   WORKSPACE_NAME="$2"
                   FILTERED_ARGS+=("$1" "$2")
                   shift 2
                   ;;
                 --persist-dir)
-                  [[ $# -ge 2 ]] || { echo "ocsb-ironclaw: $1 requires a value" >&2; exit 1; }
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
                   PERSIST_DIR="$2"
                   shift 2
                   ;;
@@ -80,7 +107,7 @@
               if [[ -n "''${OCSB_IRONCLAW_PERSIST_DIR:-}" ]]; then
                 PERSIST_DIR="$OCSB_IRONCLAW_PERSIST_DIR"
               else
-                PERSIST_DIR="$HOME/.cache/ocsb/ironclaw/$WORKSPACE_NAME"
+                PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT/$WORKSPACE_NAME"
               fi
             fi
 
@@ -102,10 +129,39 @@
               --rw "$PERSIST_DIR/nix-user:/home/sandbox/.nix-portable" \
               "''${FILTERED_ARGS[@]}"
           '';
-        }
+
+          # Build per-version package + per-version sandbox wrapper.
+          # First entry of ironclawVersions is treated as "latest" and gets
+          # the unversioned `ironclaw` / `ironclaw-sandbox` aliases.
+          versionEntries = lib.concatMap (v:
+            let
+              pkg = mkIronclawPackage v;
+              base = mkIronclawSandboxBase pkg;
+            in
+            [
+              { name = "ironclaw_${v.slug}"; value = pkg; }
+              { name = "ironclaw-sandbox_${v.slug}"; value = mkSandboxBin { slug = "_${v.slug}"; ironclawSandboxBase = base; }; }
+            ]
+          ) ironclawVersions;
+
+          versionAttrs = lib.listToAttrs versionEntries;
+
+          latest = builtins.head ironclawVersions;
+          latestPkg = mkIronclawPackage latest;
+          latestBase = mkIronclawSandboxBase latestPkg;
+        in
+        {
+          default = mkSandbox (import ./templates/opencode.nix { inherit pkgs; });
+
+          # Aliases pointing at the latest tracked release.
+          ironclaw = latestPkg;
+          ironclaw-sandbox = mkSandboxBin { slug = ""; ironclawSandboxBase = latestBase; };
+        } // versionAttrs
       );
 
-      # CI checks — build all sandbox variants to verify they evaluate and build
+      # CI checks — build sandbox variants to verify they evaluate and build.
+      # Versioned ironclaw builds are NOT in checks (heavy Rust compile);
+      # they remain buildable on demand via `nix build .#ironclaw_v0_XX_X`.
       checks = forAllSystems (system:
         let
           pkgs = mkPkgs system;
