@@ -4,6 +4,11 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -17,7 +22,7 @@ jobs:
         continue-on-error: true
 
       - name: Check flake
-        run: nix flake check
+        run: nix flake check --no-build
 
       - name: Build default package
         run: nix build .#packages.x86_64-linux.default
@@ -27,3 +32,65 @@ jobs:
 
       - name: Build dual-layer test variant
         run: nix build .#checks.x86_64-linux.dual-layer-test
+
+  ironclaw:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rust + wasmtime + ruff is huge; reclaim ~30GB before nix store fills.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        continue-on-error: true
+
+      - name: Build ironclaw (latest)
+        run: nix build .#packages.x86_64-linux.ironclaw --print-build-logs
+
+      - name: Build ironclaw-sandbox (latest)
+        run: nix build .#packages.x86_64-linux.ironclaw-sandbox --print-build-logs
+
+      - name: Run ironclaw-test check
+        run: nix build .#checks.x86_64-linux.ironclaw-test --print-build-logs
+
+  ironclaw-versions:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 90
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [v0_25_0, v0_24_0]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        continue-on-error: true
+
+      - name: Build ironclaw_${{ matrix.version }}
+        run: nix build .#packages.x86_64-linux.ironclaw_${{ matrix.version }} --print-build-logs
