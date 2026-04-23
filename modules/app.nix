@@ -31,6 +31,12 @@
       description = "Name for the generated wrapper script derivation.";
       example = "ocsb-opencode";
     };
+
+    preExecHook = lib.mkOption {
+      type = lib.types.lines;
+      default = "";
+      description = "Bash code executed inside sandbox right before app.package binary, runs as sandbox user with full env.";
+    };
   };
 
 }

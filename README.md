@@ -180,6 +180,46 @@ In addition to the workspace strategy, you can mount specific host directories w
 - `--overlay-mount HOST:SANDBOX` — mounts a host directory into the sandbox using overlayfs (changes stored in `~/.cache/ocsb/`)
 - `--snap-mount HOST:SANDBOX` — mounts a host directory using a btrfs snapshot (requires source to be a btrfs subvolume)
 
+## Ironclaw template
+
+This repository now includes an `ironclaw` template for running [NEAR AI Ironclaw](https://github.com/nearai/ironclaw) (Rust + PostgreSQL + pgvector) inside an isolated ocsb bubblewrap sandbox.
+
+- Package: `.#ironclaw`
+- Sandbox wrapper: `.#ironclaw-sandbox` (`result/bin/ocsb-ironclaw`)
+
+### Persistence
+
+The ironclaw wrapper persists runtime state under:
+
+- default: `~/.cache/ocsb/ironclaw/<workspace>/`
+
+You can override persistence with either:
+
+- `OCSB_IRONCLAW_PERSIST_DIR=/absolute/path`
+- `--persist-dir /absolute/path`
+
+The host-side wrapper bind-mounts persistence subdirectories into the sandbox (home, postgres data/run dirs, ironclaw data dir, nix-portable home) before launch.
+
+### Nix modes
+
+Select mode with `OCSB_IRONCLAW_NIX_MODE`:
+
+- `portable` (default, recommended) — uses `nix-portable`
+- `single-user` — keeps Nix state under `~/.local/nix`
+- `isolated-store` — reserved mode; currently requires manual `/nix/store` overlay setup (not auto-configured)
+
+### TUN integration
+
+Filtered networking works with host-side TUN setups (e.g. Clash Verge Rev / Mihomo TUN mode). `network.tunDevice` (default: `"Mihomo"`) is currently informational and reserved for future sandbox-side TUN integration.
+
+### Postgres + pgvector
+
+The template uses `postgresql_18` with `pgvector` and starts PostgreSQL inside the sandbox on a Unix socket only (`/run/postgresql`). TCP listening is disabled.
+
+### Security model
+
+The runtime pipeline executes as the non-root host user. In filtered mode, sandbox setup briefly uses internal uid=0 to install firewall rules, then drops all capabilities and returns to host uid/gid before running the payload.
+
 ## Tests
 
 ```bash

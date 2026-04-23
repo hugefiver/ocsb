@@ -43,6 +43,7 @@ let
     rootPaths =
       [ sandboxBin pkgs.bubblewrap pkgs.cacert ]
       ++ lib.optional (cfg.app.package != null) cfg.app.package
+      ++ lib.optional (preExecScript != null) preExecScript
       ++ lib.optional (networkMode == "filtered" && !dualLayerEnabled) networkSetupScript
       ++ lib.optional dualLayerEnabled sandboxShell
       ;
@@ -73,6 +74,15 @@ let
     if cfg.app.package != null
     then "${cfg.app.package}/${cfg.app.binPath}"
     else "${sandboxBin}/bin/bash";
+
+  preExecScript =
+    if cfg.app.preExecHook != ""
+    then pkgs.writeShellScript "${cfg.app.name}-pre-exec" ''
+      set -euo pipefail
+      ${cfg.app.preExecHook}
+      exec "$@"
+    ''
+    else null;
 
   # --- Network mode ---
   # null → host network, true → filtered (slirp4netns + iptables), false → no network
@@ -139,6 +149,10 @@ let
       # Drop capabilities if still present (defense-in-depth).
       # Some bwrap/kernel combinations already drop all caps; others
       # retain them inside user namespaces. Handle both gracefully.
+      if [ "''${OCSB_HOST_UID:-0}" != "0" ] || [ "''${OCSB_HOST_GID:-0}" != "0" ]; then
+        exec ${pkgs.util-linux}/bin/setpriv --no-new-privs --bounding-set=-all --reuid "''${OCSB_HOST_UID}" --regid "''${OCSB_HOST_GID}" --clear-groups -- "$@"
+      fi
+
       if ! ${pkgs.gnugrep}/bin/grep -q 'CapEff:.*0000000000000000' /proc/self/status 2>/dev/null || \
          ! ${pkgs.gnugrep}/bin/grep -q 'CapPrm:.*0000000000000000' /proc/self/status 2>/dev/null; then
         exec ${pkgs.util-linux}/bin/setpriv --no-new-privs --bounding-set=-all -- "$@"
@@ -655,6 +669,9 @@ let
       --proc /proc
       --tmpfs /tmp
       --tmpfs /run
+      --dir /var
+      --dir /var/lib
+      --dir /var/lib/postgresql
 
       ${if networkMode == "filtered" && !dualLayerEnabled then
         ''--ro-bind "${customResolvConf}" /etc/resolv.conf''
@@ -751,6 +768,8 @@ let
       --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
       --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
       --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
+      --setenv OCSB_HOST_UID "$(${pkgs.coreutils}/bin/id -u)"
+      --setenv OCSB_HOST_GID "$(${pkgs.coreutils}/bin/id -g)"
       ${lib.optionalString dualLayerEnabled ''--setenv SHELL "${sandboxShell}"''}
       ${lib.optionalString dualLayerEnabled ''--setenv OCSB_DUAL_LAYER outer''}
     )
@@ -777,6 +796,10 @@ let
     else
       SANDBOX_CMD=(${lib.escapeShellArg appExec})
     fi
+    ''}
+
+    ${lib.optionalString (preExecScript != null) ''
+    SANDBOX_CMD=(${preExecScript} "''${SANDBOX_CMD[@]}")
     ''}
 
     # =========================================================

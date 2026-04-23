@@ -40,5 +40,11 @@
         installation — if any rule fails, the sandbox aborts.
       '';
     };
+
+    tunDevice = lib.mkOption {
+      type = lib.types.str;
+      default = "Mihomo";
+      description = "Name of host TUN device used by Clash/Mihomo. Currently informational; reserved for future sandbox-side TUN integration.";
+    };
   };
 }
