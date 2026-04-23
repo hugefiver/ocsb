@@ -40,6 +40,15 @@ echo "=== btrfs strategy test ==="
 
 echo "test-content" > "$PROJECT_DIR/testfile.txt"
 
+# SKIP if btrfs strategy unusable (e.g. plain btrfs without user_subvol_rm_allowed).
+PROBE_OUT="$(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-probe" --strategy btrfs --overwrite -- -c true 2>&1 || true)"
+if echo "$PROBE_OUT" | grep -q "btrfs strategy unavailable"; then
+  echo "SKIP: btrfs strategy unavailable in this environment"
+  echo "  reason: $(echo "$PROBE_OUT" | grep "btrfs strategy unavailable" | head -1)"
+  exit 0
+fi
+rm -rf "$PROJECT_DIR/.ocsb/btrfs-probe" 2>/dev/null || true
+
 (cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --overwrite -- -c true 2>/dev/null) || true
 
 SNAP_DIR="$PROJECT_DIR/.ocsb/btrfs-test/snapshot"

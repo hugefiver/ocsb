@@ -407,6 +407,35 @@ let
 
     validate_workspace_name "$WORKSPACE_NAME" || exit 1
 
+    # =========================================================
+    # btrfs probe: returns 0 if dir is on btrfs AND current user can
+    # create AND delete subvolumes there (needs user_subvol_rm_allowed
+    # mount option for unprivileged delete). Sets _btrfs_probe_reason.
+    # rc=1 not btrfs / rc=2 btrfs but no perm.
+    # =========================================================
+    _btrfs_probe_reason=""
+    _btrfs_probe() {
+      local _dir="$1"
+      local _fstype
+      _fstype="$(${pkgs.coreutils}/bin/stat -f -c %T "$_dir" 2>/dev/null)"
+      if [[ "$_fstype" != "btrfs" ]]; then
+        _btrfs_probe_reason="not a btrfs filesystem (fstype=$_fstype)"
+        return 1
+      fi
+      local _probe="$_dir/.ocsb-btrfs-probe.$$"
+      if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume create "$_probe" &>/dev/null; then
+        _btrfs_probe_reason="cannot create subvolume in $_dir (permission denied)"
+        return 1
+      fi
+      if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_probe" &>/dev/null; then
+        ${pkgs.coreutils}/bin/rm -rf "$_probe" 2>/dev/null || true
+        _btrfs_probe_reason="cannot delete subvolume (mount with 'user_subvol_rm_allowed' or run as root)"
+        return 2
+      fi
+      _btrfs_probe_reason=""
+      return 0
+    }
+
     # Validate strategy before creating any state
     case "$WORKSPACE_STRATEGY" in
       auto|overlayfs|btrfs|git-worktree|direct) ;;
@@ -420,12 +449,12 @@ let
     # Auto-detect: resolve 'auto' to btrfs or overlayfs
     # =========================================================
     if [[ "$WORKSPACE_STRATEGY" == "auto" ]]; then
-      if ${pkgs.btrfs-progs}/bin/btrfs subvolume show "$PROJECT_DIR" &>/dev/null 2>&1; then
+      if _btrfs_probe "$PROJECT_DIR"; then
         WORKSPACE_STRATEGY="btrfs"
-        echo "ocsb: auto-detected btrfs filesystem, using btrfs snapshot strategy" >&2
+        echo "ocsb: auto-detected btrfs filesystem with subvolume perms, using btrfs snapshot strategy" >&2
       else
         WORKSPACE_STRATEGY="overlayfs"
-        echo "ocsb: filesystem is not btrfs, using overlayfs strategy" >&2
+        echo "ocsb: btrfs unavailable ($_btrfs_probe_reason), using overlayfs strategy" >&2
       fi
     fi
 
@@ -550,10 +579,10 @@ let
         if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$BTRFS_SNAP" ]]; then
           echo "ocsb: reusing btrfs snapshot at $BTRFS_SNAP" >&2
         else
-          # Check if project dir is a btrfs subvolume (required for snapshot)
-          if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume show "$PROJECT_DIR" &>/dev/null; then
-            echo "ocsb: btrfs strategy requires project directory to be a btrfs subvolume" >&2
-            echo "  Hint: create one with 'btrfs subvolume create <path>'" >&2
+          # Check if project dir is on btrfs and we can manage subvolumes
+          if ! _btrfs_probe "$PROJECT_DIR"; then
+            echo "ocsb: btrfs strategy unavailable: $_btrfs_probe_reason" >&2
+            echo "  Hint: ensure project dir is on btrfs and the filesystem is mounted with 'user_subvol_rm_allowed'." >&2
             exit 1
           fi
           # Create a read-write snapshot of the project directory
@@ -739,8 +768,10 @@ let
       if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$_SNAP_DIR" ]]; then
         echo "ocsb: reusing snapshot $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
       else
-        if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume show "$_SNAP_HOST" &>/dev/null; then
-          echo "ocsb: error: --snap-mount source must be a btrfs subvolume: $_SNAP_HOST" >&2
+        # Detect btrfs subvolume by inode (subvol roots have inode 256)
+        _SNAP_INO="$(${pkgs.coreutils}/bin/stat -c %i "$_SNAP_HOST" 2>/dev/null || echo 0)"
+        if [[ "$_SNAP_INO" != "256" ]]; then
+          echo "ocsb: error: --snap-mount source must be a btrfs subvolume root: $_SNAP_HOST" >&2
           exit 1
         fi
         if [[ -d "$_SNAP_DIR" ]]; then
