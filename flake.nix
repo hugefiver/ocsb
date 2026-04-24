@@ -80,6 +80,7 @@
             VARIANT="ironclaw${slug}"
             PERSIST_DIR=""
             FILTERED_ARGS=()
+            HAS_CONTINUE_OR_OVERWRITE=0
 
             usage() {
               cat <<EOF
@@ -124,6 +125,11 @@
                   FILTERED_ARGS+=("$1" "$2")
                   shift 2
                   ;;
+                --continue|--overwrite)
+                  HAS_CONTINUE_OR_OVERWRITE=1
+                  FILTERED_ARGS+=("$1")
+                  shift
+                  ;;
                 --persist-dir)
                   [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
                   PERSIST_DIR="$2"
@@ -151,6 +157,12 @@
               else
                 PERSIST_DIR="$HOME/.cache/ocsb/ironclaw"
               fi
+            fi
+
+            # Default to --continue: ironclaw's real state is in $PERSIST_DIR,
+            # the cwd workspace marker is just a tracking dir.
+            if [[ "$HAS_CONTINUE_OR_OVERWRITE" -eq 0 ]]; then
+              FILTERED_ARGS=(--continue "''${FILTERED_ARGS[@]}")
             fi
 
             PERSIST_DIR="$(${pkgs.coreutils}/bin/realpath -m "$PERSIST_DIR")"
