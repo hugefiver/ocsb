@@ -678,7 +678,7 @@ let
       --unshare-all
       ${lib.optionalString (networkMode == "host" || dualLayerEnabled) "--share-net"}
       --die-with-parent
-      --new-session
+      ${lib.optionalString (!cfg.app.preserveCtty) "--new-session"}
       --clearenv
 
       ${if networkMode == "filtered" && !dualLayerEnabled && cfg.app.runAsRoot then ''

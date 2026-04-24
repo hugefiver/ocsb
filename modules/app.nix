@@ -38,6 +38,24 @@
       description = "Bash code executed inside sandbox right before app.package binary, runs as sandbox user with full env.";
     };
 
+    preserveCtty = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        If true, omit bwrap's --new-session flag so the sandboxed process
+        inherits the controlling tty. Required for interactive TUI apps
+        (e.g. ironclaw onboard wizard, plain --shell bash) — without ctty,
+        readline/raw-mode input sees EOF and the app exits or auto-skips
+        prompts.
+
+        Security tradeoff: --new-session prevents TIOCSTI ioctl injection
+        from inside the sandbox into the host tty. Modern kernels (>= 5.17)
+        restrict TIOCSTI by default (dev.tty.legacy_tiocsti_restrict=1),
+        making this mitigation largely redundant. Keep false (default) for
+        non-interactive or non-TUI workloads.
+      '';
+    };
+
     runAsRoot = lib.mkOption {
       type = lib.types.bool;
       default = true;

@@ -11,6 +11,7 @@ in
     package = ironclawPackage;
     binPath = "bin/ironclaw";
     runAsRoot = false;
+    preserveCtty = true;
     preExecHook = ''
       set -euo pipefail
 
