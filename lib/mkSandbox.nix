@@ -271,11 +271,15 @@ let
         [[ -e "$_PIDFILE" ]] && ${pkgs.coreutils}/bin/rm -f "$_PIDFILE"
         exit 1
       fi
-      # bwrap forks the sandbox init as its only child; that child
+      # bwrap forks the sandbox-init child (also named "bwrap"), which
       # holds the user/mount/pid/etc namespaces we want to enter.
-      _INIT_PID=$(${pkgs.procps}/bin/pgrep -P "$_BWRAP_PID" | ${pkgs.coreutils}/bin/head -n1 || true)
+      # In filtered-network mode, slirp4netns is ALSO a child of bwrap
+      # (reparented when launcher exec'd into bwrap), but it lives in
+      # host namespaces — entering its namespaces would EINVAL. Filter
+      # by comm=bwrap to pick the sandbox init reliably.
+      _INIT_PID=$(${pkgs.procps}/bin/pgrep -P "$_BWRAP_PID" -x bwrap | ${pkgs.coreutils}/bin/head -n1 || true)
       if [[ -z "$_INIT_PID" ]]; then
-        echo "ocsb: bwrap PID $_BWRAP_PID has no child process to attach to" >&2
+        echo "ocsb: bwrap PID $_BWRAP_PID has no sandbox-init child to attach to" >&2
         exit 1
       fi
       # Inner shell: inherit sandbox PID 1's env (preExecHook exports
