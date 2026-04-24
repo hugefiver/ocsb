@@ -1,7 +1,6 @@
 tmp/
 result
 result-*
-flake.lock
 .sisyphus/
 agent-sandbox.nix/
 nixwrap/

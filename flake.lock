@@ -1,0 +1,81 @@
+{
+  "nodes": {
+    "ironclaw-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1776749829,
+        "narHash": "sha256-Dgc3tg5Dk+l9+OMvU+gzNICOrpaIgDhNWEbHqOf8sxo=",
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "15b1f14149511ef5d256cc9aab15651fd3de0bdb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nearai",
+        "ref": "ironclaw-v0.26.0",
+        "repo": "ironclaw",
+        "type": "github"
+      }
+    },
+    "ironclaw-src-v0_24_0": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1774971541,
+        "narHash": "sha256-DtlHp53PVu+25wusCu1e4gGK9LHPt3i6jqQup0atF/0=",
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "9bb699e95b08d11af0459fab1b70d51ccd55cf20",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "9bb699e95b08d11af0459fab1b70d51ccd55cf20",
+        "type": "github"
+      }
+    },
+    "ironclaw-src-v0_25_0": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1775869191,
+        "narHash": "sha256-d6pSqQ5e0nFIg74VTu3tUQHXj3Fosv/p7UIKLN1yjaQ=",
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "23fe1826842be5ac50bbac729f29d9d0d3ec8847",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "23fe1826842be5ac50bbac729f29d9d0d3ec8847",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1776548001,
+        "narHash": "sha256-ZSK0NL4a1BwVbbTBoSnWgbJy9HeZFXLYQizjb2DPF24=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "b12141ef619e0a9c1c84dc8c684040326f27cdcc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "ironclaw-src": "ironclaw-src",
+        "ironclaw-src-v0_24_0": "ironclaw-src-v0_24_0",
+        "ironclaw-src-v0_25_0": "ironclaw-src-v0_25_0",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
