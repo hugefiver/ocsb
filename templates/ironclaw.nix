@@ -133,6 +133,8 @@ in
     LANG = "C.UTF-8";
     EDITOR = "cat";
     PGHOST = "/run/postgresql";
-    DATABASE_URL = "postgres:///ironclaw?host=/run/postgresql";
+    DATABASE_URL = "postgres:///ironclaw?host=/run/postgresql&sslmode=disable";
+    DATABASE_BACKEND = "postgres";
+    DATABASE_SSLMODE = "disable";
   };
 }
