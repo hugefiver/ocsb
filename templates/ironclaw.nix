@@ -108,7 +108,9 @@
   mounts.ro = [];
 
   workspace = {
-    strategy = "auto";
+    # All persistent state lives under mounts.rw bind-mounts (home, data, pgdata, etc).
+    # cwd is irrelevant to ironclaw, so skip CoW snapshot overhead and bind cwd directly.
+    strategy = "direct";
     baseDir = ".ocsb";
     name = "ironclaw";
   };
