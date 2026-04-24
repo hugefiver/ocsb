@@ -838,11 +838,9 @@ let
     # =========================================================
     ${if networkMode == "filtered" && !dualLayerEnabled then ''
     _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
-    _BWRAP_PID=""
     _SLIRP_PID=""
 
     _cleanup_net() {
-      [[ -n "$_BWRAP_PID" ]] && kill "$_BWRAP_PID" 2>/dev/null || true
       [[ -n "$_SLIRP_PID" ]] && kill "$_SLIRP_PID" 2>/dev/null || true
       ${pkgs.coreutils}/bin/rm -rf "$_NET_TMP"
     }
@@ -850,28 +848,23 @@ let
 
     ${pkgs.coreutils}/bin/mkfifo "$_NET_TMP/info"
 
+    # Reader runs in background: waits for bwrap to write child PID to the
+    # fifo, then launches slirp4netns. bwrap itself runs in the FOREGROUND
+    # via exec so it owns the controlling tty's foreground process group;
+    # otherwise apps that call tcsetattr() (raw-mode TUIs like ironclaw's
+    # dialoguer prompts) get EIO/SIGTTOU and silently fall back to
+    # non-interactive mode, auto-defaulting every prompt.
     (
-      exec ${pkgs.bubblewrap}/bin/bwrap \
-        "''${BWRAP_ARGS[@]}" \
-        --info-fd 3 \
-        -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
-        3>"$_NET_TMP/info"
+      _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || exit 1
+      exec ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0
     ) &
-    _BWRAP_PID=$!
-
-    _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || {
-      >&2 echo "ocsb: failed to start sandbox with network filtering"
-      exit 1
-    }
-
-    ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0 &
     _SLIRP_PID=$!
 
-    set +e
-    wait "$_BWRAP_PID"
-    _BWRAP_RC=$?
-    _BWRAP_PID=""
-    exit $_BWRAP_RC
+    exec ${pkgs.bubblewrap}/bin/bwrap \
+      "''${BWRAP_ARGS[@]}" \
+      --info-fd 3 \
+      -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
+      3>"$_NET_TMP/info"
     '' else ''
     # Simple exec: host network or no network
     exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
