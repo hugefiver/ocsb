@@ -184,7 +184,7 @@
 
             if [[ "$SHELL_MODE" -eq 1 ]]; then
               export OCSB_EXEC_OVERRIDE=1
-              FILTERED_ARGS+=(-- ${pkgs.bashInteractive}/bin/bash)
+              FILTERED_ARGS+=(-- ${pkgs.bashInteractive}/bin/bash -i)
             fi
 
             exec ${ironclawSandboxBase}/bin/ironclaw \
