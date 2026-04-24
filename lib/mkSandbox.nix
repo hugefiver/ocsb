@@ -146,13 +146,9 @@ let
         echo "ocsb: network isolation still active (namespace + slirp4netns + disable-host-loopback)" >&2
       fi
 
-      # Drop capabilities if still present (defense-in-depth).
-      # Some bwrap/kernel combinations already drop all caps; others
-      # retain them inside user namespaces. Handle both gracefully.
-      if [ "''${OCSB_HOST_UID:-0}" != "0" ] || [ "''${OCSB_HOST_GID:-0}" != "0" ]; then
-        exec ${pkgs.util-linux}/bin/setpriv --no-new-privs --bounding-set=-all --reuid "''${OCSB_HOST_UID}" --regid "''${OCSB_HOST_GID}" --clear-groups -- "$@"
-      fi
-
+      # Drop capabilities (defense-in-depth). uid 0 inside an unprivileged
+      # userns has no host privileges, so no uid switch is needed (and
+      # would fail anyway: only uid 0 is mapped in the bwrap userns).
       if ! ${pkgs.gnugrep}/bin/grep -q 'CapEff:.*0000000000000000' /proc/self/status 2>/dev/null || \
          ! ${pkgs.gnugrep}/bin/grep -q 'CapPrm:.*0000000000000000' /proc/self/status 2>/dev/null; then
         exec ${pkgs.util-linux}/bin/setpriv --no-new-privs --bounding-set=-all -- "$@"
