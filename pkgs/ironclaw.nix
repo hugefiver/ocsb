@@ -2,6 +2,7 @@
 , lib ? pkgs.lib
 , ironclaw-src
 , version ? "unstable"
+, microArch ? "x86-64"
 }:
 let
   # Hash table for known git dependencies across all tracked releases. Entries
@@ -33,8 +34,16 @@ let
     in
     builtins.length hits > 1
   ) allOutputHashes;
+  # Baseline x86-64 omits RUSTFLAGS / NIX_CFLAGS_COMPILE entirely so the
+  # derivation hash matches the pre-microArch state — preserves existing
+  # cachix cache for the default (no-suffix) variant. Only non-baseline
+  # variants inject the flags and produce new hashes.
+  archAttrs = lib.optionalAttrs (microArch != "x86-64") {
+    RUSTFLAGS = "-C target-cpu=${microArch}";
+    NIX_CFLAGS_COMPILE = "-march=${microArch}";
+  };
 in
-pkgs.rustPlatform.buildRustPackage {
+pkgs.rustPlatform.buildRustPackage ({
   pname = "ironclaw";
   inherit version;
 
@@ -75,10 +84,10 @@ pkgs.rustPlatform.buildRustPackage {
   doCheck = false;
 
   meta = with lib; {
-    description = "NEAR AI Ironclaw runtime (v${version})";
+    description = "NEAR AI Ironclaw runtime (v${version}, ${microArch})";
     homepage = "https://github.com/nearai/ironclaw";
     license = licenses.mit;
     mainProgram = "ironclaw";
     platforms = platforms.linux;
   };
-}
+} // archAttrs)

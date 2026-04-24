@@ -40,6 +40,14 @@
         { slug = "v0_25_0"; version = "0.25.0"; src = ironclaw-src-v0_25_0; }
         { slug = "v0_24_0"; version = "0.24.0"; src = ironclaw-src-v0_24_0; }
       ];
+
+      # Micro-architecture variants. The first entry is the unsuffixed default
+      # (psABI x86-64-v1, baseline). Additional entries produce parallel
+      # packages with `_<archSlug>` appended to every name.
+      ironclawArchs = [
+        { archSlug = ""; microArch = "x86-64"; }
+        { archSlug = "x86_64_v3"; microArch = "x86-64-v3"; }
+      ];
     in
     {
       lib.mkSandbox = { system ? "x86_64-linux" }:
@@ -53,9 +61,9 @@
           pkgs = mkPkgs system;
           mkSandbox = import ./lib/mkSandbox.nix { inherit pkgs; lib = nixpkgs.lib; };
 
-          mkIronclawPackage = { src, version, ... }: pkgs.callPackage ./pkgs/ironclaw.nix {
+          mkIronclawPackage = { src, version, microArch, ... }: pkgs.callPackage ./pkgs/ironclaw.nix {
             ironclaw-src = src;
-            inherit version;
+            inherit version microArch;
           };
 
           mkIronclawSandboxBase = ironclawPackage: mkSandbox (import ./templates/ironclaw.nix {
@@ -130,33 +138,55 @@
               "''${FILTERED_ARGS[@]}"
           '';
 
-          # Build per-version package + per-version sandbox wrapper.
-          # First entry of ironclawVersions is treated as "latest" and gets
-          # the unversioned `ironclaw` / `ironclaw-sandbox` aliases.
+          # Build per-version × per-arch package + sandbox wrapper.
+          # First entry of ironclawVersions × first entry of ironclawArchs is
+          # the "latest baseline" → `ironclaw` / `ironclaw-sandbox` aliases.
+          # Per-arch suffix appended after version slug; empty archSlug means
+          # the unsuffixed (baseline x86-64-v1) variant.
           versionEntries = lib.concatMap (v:
-            let
-              pkg = mkIronclawPackage v;
-              base = mkIronclawSandboxBase pkg;
-            in
-            [
-              { name = "ironclaw_${v.slug}"; value = pkg; }
-              { name = "ironclaw-sandbox_${v.slug}"; value = mkSandboxBin { slug = "_${v.slug}"; ironclawSandboxBase = base; }; }
-            ]
+            lib.concatMap (a:
+              let
+                pkg = mkIronclawPackage (v // { inherit (a) microArch; });
+                base = mkIronclawSandboxBase pkg;
+                archSuffix = if a.archSlug == "" then "" else "_${a.archSlug}";
+                fullSlug = "${v.slug}${archSuffix}";
+              in
+              [
+                { name = "ironclaw_${fullSlug}"; value = pkg; }
+                { name = "ironclaw-sandbox_${fullSlug}"; value = mkSandboxBin { slug = "_${fullSlug}"; ironclawSandboxBase = base; }; }
+              ]
+            ) ironclawArchs
           ) ironclawVersions;
 
           versionAttrs = lib.listToAttrs versionEntries;
 
-          latest = builtins.head ironclawVersions;
-          latestPkg = mkIronclawPackage latest;
+          latestVersion = builtins.head ironclawVersions;
+          baselineArch = builtins.head ironclawArchs;
+          latestPkg = mkIronclawPackage (latestVersion // { inherit (baselineArch) microArch; });
           latestBase = mkIronclawSandboxBase latestPkg;
+
+          # Per-arch latest aliases (e.g. `ironclaw_x86_64_v3` = latest version
+          # at arch v3). The baseline arch is the unsuffixed `ironclaw`.
+          latestArchEntries = lib.concatMap (a:
+            if a.archSlug == "" then [] else
+            let
+              pkg = mkIronclawPackage (latestVersion // { inherit (a) microArch; });
+              base = mkIronclawSandboxBase pkg;
+            in
+            [
+              { name = "ironclaw_${a.archSlug}"; value = pkg; }
+              { name = "ironclaw-sandbox_${a.archSlug}"; value = mkSandboxBin { slug = "_${a.archSlug}"; ironclawSandboxBase = base; }; }
+            ]
+          ) ironclawArchs;
+          latestArchAttrs = lib.listToAttrs latestArchEntries;
         in
         {
           default = mkSandbox (import ./templates/opencode.nix { inherit pkgs; });
 
-          # Aliases pointing at the latest tracked release.
+          # Aliases pointing at the latest tracked release (baseline arch).
           ironclaw = latestPkg;
           ironclaw-sandbox = mkSandboxBin { slug = ""; ironclawSandboxBase = latestBase; };
-        } // versionAttrs
+        } // versionAttrs // latestArchAttrs
       );
 
       # CI checks — build sandbox variants to verify they evaluate and build.
