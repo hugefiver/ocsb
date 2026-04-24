@@ -75,6 +75,14 @@ let
     then "${cfg.app.package}/${cfg.app.binPath}"
     else "${sandboxBin}/bin/bash";
 
+  # PATH inside sandbox: include app's bin dir if a package is configured,
+  # so the app's command is callable by bare name (e.g. `ironclaw` works
+  # in --shell / --attach sessions without typing the full store path).
+  sandboxPath =
+    if cfg.app.package != null
+    then "${cfg.app.package}/bin:/usr/bin"
+    else "/usr/bin";
+
   preExecScript =
     if cfg.app.preExecHook != ""
     then pkgs.writeShellScript "${cfg.app.name}-pre-exec" ''
@@ -201,7 +209,7 @@ let
       --ro-bind-try /etc/group /etc/group
       --clearenv
       --setenv HOME /home/sandbox
-      --setenv PATH /usr/bin
+  --setenv PATH ${sandboxPath}
       --setenv TERM "''${TERM:-xterm-256color}"
       --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       --setenv SANDBOX 1
@@ -919,9 +927,19 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # otherwise apps that call tcsetattr() (raw-mode TUIs like ironclaw's
     # dialoguer prompts) get EIO/SIGTTOU and silently fall back to
     # non-interactive mode, auto-defaulting every prompt.
+    #
+    # Two cleanup-critical details:
+    #   1. `exec 9>&-` releases the workspace flock fd that this subshell
+    #      inherited from the launcher. Otherwise slirp4netns would hold
+    #      the lock open after bwrap dies, blocking subsequent launches
+    #      with "workspace is locked by another process".
+    #   2. `setpriv --pdeathsig=TERM` makes slirp4netns die when its
+    #      parent (bwrap, post-exec) dies. Without it, slirp4netns
+    #      orphans to PID 1 and leaks indefinitely.
     (
       _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || exit 1
-      exec ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0
+      exec 9>&-
+      exec ${pkgs.util-linux}/bin/setpriv --pdeathsig=TERM -- ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0
     ) &
     _SLIRP_PID=$!
 
