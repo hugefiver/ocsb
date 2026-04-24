@@ -799,9 +799,36 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       --symlink /usr/bin /bin
     )
 
-    # /nix/store layout
-    ${if cfg.experimental.nixStoreOverlay then ''
-      # Writable overlay: lower = host /nix/store, upper = per-workspace
+    # /nix/store layout — see modules/experimental.nix nixStoreMode for tradeoffs.
+    ${if cfg.experimental.nixStoreMode == "chroot" then ''
+      # Chroot store: relocated, writable nix store populated by `nix copy`.
+      # Sandbox sees a real /nix/store with cache-compatible prefix; can
+      # `nix profile add nixpkgs#foo` and persist pkgs per-workspace.
+      _CHROOT_ROOT="$OVERLAY_STATE_DIR/chroot"
+      _CHROOT_MARKER="$OVERLAY_STATE_DIR/.chroot-source"
+      _CHROOT_SRC="${closureInfoDrv}"
+      ${pkgs.coreutils}/bin/mkdir -p "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix"
+      if [[ ! -f "$_CHROOT_MARKER" ]] || [[ "$(${pkgs.coreutils}/bin/cat "$_CHROOT_MARKER" 2>/dev/null)" != "$_CHROOT_SRC" ]]; then
+        echo "ocsb: populating chroot nix store at $_CHROOT_ROOT (first run / closure changed; may take a while)..." >&2
+        mapfile -t _CHROOT_PATHS < "$_CHROOT_SRC/store-paths"
+        if ! ${pkgs.nix}/bin/nix --extra-experimental-features "nix-command" copy \
+            --no-check-sigs --offline \
+            --to "local?root=$_CHROOT_ROOT" \
+            "''${_CHROOT_PATHS[@]}" >&2; then
+          echo "ocsb: error: nix copy into chroot store failed" >&2
+          exit 1
+        fi
+        echo "$_CHROOT_SRC" > "$_CHROOT_MARKER"
+        echo "ocsb: chroot nix store ready" >&2
+      fi
+      BWRAP_ARGS+=(
+        --bind "$_CHROOT_ROOT/nix/store" /nix/store
+        --bind "$_CHROOT_ROOT/nix/var/nix" /nix/var/nix
+      )
+    '' else if cfg.experimental.nixStoreMode == "overlay" then ''
+      # Writable overlay: lower = host /nix/store, upper = per-workspace.
+      # Note: copy-up of root-owned host files fails under user-NS on most
+      # kernels (EPERM). Use chroot mode for full read-write semantics.
       ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/nix-store-upper" "$OVERLAY_STATE_DIR/nix-store-work"
       BWRAP_ARGS+=(
         --overlay-src /nix/store
@@ -809,7 +836,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       )
       echo "ocsb: /nix/store overlay enabled (upper: $OVERLAY_STATE_DIR/nix-store-upper)" >&2
     '' else ''
-      # Closure-only /nix/store mounts: mount each store path individually
+      # Closure-only /nix/store mounts: mount each store path individually,
+      # read-only. Smallest attack surface; cannot install pkgs in-sandbox.
       while IFS= read -r storePath; do
         BWRAP_ARGS+=(--ro-bind "$storePath" "$storePath")
       done < ${closureInfoDrv}/store-paths

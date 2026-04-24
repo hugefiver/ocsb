@@ -111,8 +111,9 @@
               data/        ironclaw application data
               pgdata/      PostgreSQL 18 cluster
               pgrun/       postgres unix socket
-              nix-user/    nix-portable / single-user state
-              nix-store/   isolated-store overlay upper layer
+
+            Workspace cache (under \$HOME/.cache/ocsb/<hash>/ironclaw/):
+              chroot/      relocated /nix/store (chroot mode, default)
 
             First run will: initdb, start postgres on unix socket, create
             'ironclaw' DB + load pgvector, then exec ironclaw. Run
@@ -181,9 +182,7 @@
               "$PERSIST_DIR/home" \
               "$PERSIST_DIR/data" \
               "$PERSIST_DIR/pgdata" \
-              "$PERSIST_DIR/pgrun" \
-              "$PERSIST_DIR/nix-user" \
-              "$PERSIST_DIR/nix-store"
+              "$PERSIST_DIR/pgrun"
 
             if [[ "$SHELL_MODE" -eq 1 ]]; then
               export OCSB_EXEC_OVERRIDE=1
@@ -195,7 +194,6 @@
               --rw "$PERSIST_DIR/data:/var/lib/ironclaw" \
               --rw "$PERSIST_DIR/pgdata:/var/lib/postgresql/data" \
               --rw "$PERSIST_DIR/pgrun:/run/postgresql" \
-              --rw "$PERSIST_DIR/nix-user:/home/sandbox/.nix-portable" \
               "''${FILTERED_ARGS[@]}"
           '';
 

@@ -6,7 +6,9 @@ let
   pgWithExt = pkgs.postgresql_18.withPackages (p: [ p.pgvector ]);
 in
 {
-  experimental.nixStoreOverlay = true;
+  # nixStoreMode defaults to "chroot" — sandbox gets a real, writable
+  # /nix/store populated via `nix copy` on first launch. Override to
+  # "overlay" or "closure" via experimental.nixStoreMode if desired.
 
   app = {
     name = "ironclaw";
@@ -28,41 +30,6 @@ in
       warn-dirty = false
       accept-flake-config = true
       EOF
-
-      NIX_MODE="''${OCSB_IRONCLAW_NIX_MODE:-isolated-store}"
-      case "$NIX_MODE" in
-        portable)
-          # TODO: nix-portable is not packaged in nixpkgs. To enable this mode,
-          # add DavHau/nix-portable as a flake input and inject its binary into
-          # PATH here, or fetchurl the static release binary.
-          echo "[ironclaw] portable mode not yet supported (no nix-portable available)" >&2
-          exit 1
-          ;;
-        single-user)
-          # Legacy mode: relocate the store under $HOME. Cannot use cache.nixos.org
-          # binaries because their store prefix is /nix/store. Kept for fallback.
-          export NIX_STORE_DIR="$HOME/.local/nix/store"
-          export NIX_STATE_DIR="$HOME/.local/nix/var"
-          export NIX_LOG_DIR="$HOME/.local/nix/var/log/nix"
-          mkdir -p "$NIX_STORE_DIR" "$NIX_STATE_DIR" "$NIX_LOG_DIR"
-          cat >> "$HOME/.config/nix/nix.conf" <<EOF
-      store = $NIX_STORE_DIR
-      state-dir = $NIX_STATE_DIR
-      EOF
-          ;;
-        isolated-store)
-          # /nix/store is mounted as a per-workspace writable overlayfs by
-          # experimental.nixStoreOverlay above. Single-user mode (no daemon),
-          # state lives under $HOME so it doesn't pollute the overlay's upper.
-          export NIX_STATE_DIR="$HOME/.local/nix/var"
-          export NIX_LOG_DIR="$HOME/.local/nix/var/log/nix"
-          mkdir -p "$NIX_STATE_DIR" "$NIX_LOG_DIR"
-          ;;
-        *)
-          echo "Unknown OCSB_IRONCLAW_NIX_MODE: $NIX_MODE" >&2
-          exit 1
-          ;;
-      esac
 
       PGDATA=/var/lib/postgresql/data
       PGRUN=/run/postgresql

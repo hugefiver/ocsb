@@ -113,7 +113,7 @@
 
 覆盖：`OCSB_IRONCLAW_PERSIST_DIR=/path` 或 `--persist-dir /path`。
 
-**沙箱内 nix**：`OCSB_IRONCLAW_NIX_MODE=` 选 `single-user`（默认，纯用户态）/ `isolated-store`（overlay 在 closure store 上）/ `portable`（stub，需自行加 nix-portable input）。
+**沙箱内 nix**：默认 `nixStoreMode = "chroot"` —— 首次启动 `nix copy` 把闭包搬到 `$workspace/chroot/nix/store`，bind-mount 进沙箱，可在沙箱内 `nix profile add nixpkgs#foo`（cache.nixos.org 可用）。可改 `experimental.nixStoreMode = "overlay"`（overlayfs，旧实现，部分内核 copy-up 失败）或 `"closure"`（只挂闭包 RO，最小面）。
 
 **升级到新 release**（保留最近 3 个版本）：
 1. 在 `flake.nix` 把当前 `ironclaw-src` 改名为 `ironclaw-src-v0_XX_X`
