@@ -1,270 +1,168 @@
 # ocsb
 
-Nix sandbox for [OpenCode](https://github.com/opencode-ai/opencode) with isolated filesystem, network isolation, and workspace branching.
+基于 [bubblewrap](https://github.com/containers/bubblewrap) 的 Nix 沙箱框架。原生支持 [OpenCode](https://github.com/opencode-ai/opencode) 与 [Ironclaw](https://github.com/nearai/ironclaw)，也可用同样的模型沙箱化任意可执行文件。
 
-Uses [bubblewrap](https://github.com/containers/bubblewrap) to run AI coding agents in a restricted Linux namespace — limited `/nix/store` visibility, configurable network isolation, non-root identity, and copy-on-write workspace isolation.
+特性：closure-only `/nix/store`、可切换的网络隔离（host / 过滤 / 无网）、CoW workspace（overlayfs/btrfs/git-worktree/direct）、非 root 身份、capability 全 drop、声明式 Nix 模块。
 
-## Features
+## 系统要求
 
-- **Closure-only store** — only the transitive closure of declared packages is visible in `/nix/store` (typically ~100 paths, not thousands)
-- **Workspace strategies** — `overlayfs` (copy-on-write, default), `btrfs` (snapshot), `git-worktree` (detached worktree), `direct` (bind mount)
-- **Network isolation** — three modes: host network (default), filtered (slirp4netns + iptables), or no network
-- **Dual-layer sandbox** — experimental: outer sandbox with host network for the app, inner sandbox with no network for tool commands
-- **Runtime mounts** — `--ro`/`--rw` CLI flags for ad-hoc bind mounts with path validation
-- **Security hardening** — capability drop, iptables fail-closed verification, workspace name validation, symlink escape protection, git metadata boundary checks
-- **Non-root identity** — sandbox runs with host uid/gid via `--uid`/`--gid`
-- **Declarative config** — Nix module system for packages, mounts, env vars, workspace settings
+- Linux x86_64 / aarch64，启用 flakes 的 Nix
+- btrfs workspace 需要根挂载带 `user_subvol_rm_allowed`（无此选项时自动降级 overlayfs）
 
-## Requirements
+## 内置 sandbox
 
-- NixOS or Nix with flakes enabled
-- Linux (x86_64 or aarch64)
+| 命令 | 说明 |
+|---|---|
+| `nix run github:hugefiver/ocsb` | 默认：交互 bash + opencode 配置 |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox` | Ironclaw 最新版（v0.26.0），自带 postgres18 + pgvector |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_25_0` | Ironclaw v0.25.0 |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_24_0` | Ironclaw v0.24.0 |
 
-## Quick Start
+构建产物在 `./result/bin/`。
+
+## 命令行用法
 
 ```bash
-nix build github:hugefiver/ocsb
-
-# Interactive bash inside sandbox
+# 交互 shell
 ./result/bin/ocsb
 
-# Named workspace with overlayfs isolation
-./result/bin/ocsb --workspace my-feature
+# 命名 workspace（CoW 隔离）
+./result/bin/ocsb -w my-feature
 
-# Continue existing workspace
-./result/bin/ocsb --workspace my-feature --continue
+# 继续上次的 workspace
+./result/bin/ocsb -w my-feature --continue
 
-# Overwrite workspace
-./result/bin/ocsb --workspace my-feature --overwrite
+# 重置 workspace
+./result/bin/ocsb -w my-feature --overwrite
 
-# Different strategy
-./result/bin/ocsb --workspace my-feature --strategy git-worktree
+# 指定 workspace 策略
+./result/bin/ocsb -w my-feature --strategy git-worktree
 
-# Ad-hoc mounts
+# 临时 bind mount
 ./result/bin/ocsb --ro ~/data:/workspace/data --rw /tmp/out:/workspace/out
 
-# Per-directory overlay mount (CoW isolation for a specific directory)
+# 单目录 CoW（不影响 workspace 策略）
 ./result/bin/ocsb --overlay-mount /data/models:/workspace/models
+./result/bin/ocsb --snap-mount /data/datasets:/workspace/datasets   # 源需为 btrfs subvol
 
-# Per-directory btrfs snapshot mount (requires btrfs source)
-./result/bin/ocsb --snap-mount /data/datasets:/workspace/datasets
-
-# Run a command directly
-./result/bin/ocsb -- echo "hello from sandbox"
+# 直接跑命令
+./result/bin/ocsb -- echo hi
 ```
 
-## Custom Configuration
+## Workspace 策略
+
+| 值 | 说明 |
+|---|---|
+| `auto`（默认） | 探测：能用 btrfs 就 btrfs，否则 overlayfs |
+| `overlayfs` | overlay，upper 在 `~/.cache/ocsb/<hash>/<name>/upper` |
+| `btrfs` | btrfs subvol snapshot；需 `user_subvol_rm_allowed` |
+| `git-worktree` | detached worktree；需 git 仓库 |
+| `direct` | 直接 bind 项目目录（无隔离） |
+
+## 网络模式
+
+| `network.enable` | 行为 |
+|---|---|
+| `null`（默认） | 共享宿主网络栈，不隔离 |
+| `true` | slirp4netns NAT + iptables 屏蔽私网/链路本地；fail-closed |
+| `false` | `--unshare-net`，无任何连通性 |
+
+`network.enable = true` 兼容宿主侧 TUN 代理（Clash Verge Rev / Mihomo TUN）：流量经宿主路由表 → TUN 拦截，沙箱内无法直连 LAN，无法访问宿主 loopback 服务。
+
+## 自定义 sandbox
 
 ```nix
 {
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    ocsb.url = "github:hugefiver/ocsb";
-  };
-
-  outputs = { nixpkgs, ocsb, ... }:
-    let
-      pkgs = nixpkgs.legacyPackages.x86_64-linux;
-      mkSandbox = ocsb.lib.mkSandbox { system = "x86_64-linux"; };
-    in {
-      packages.x86_64-linux.default = mkSandbox ({ pkgs, ... }: {
+  inputs.ocsb.url = "github:hugefiver/ocsb";
+  outputs = { nixpkgs, ocsb, ... }: {
+    packages.x86_64-linux.default =
+      (ocsb.lib.mkSandbox { system = "x86_64-linux"; })
+      ({ pkgs, ... }: {
         app.name = "my-sandbox";
-        app.package = pkgs.opencode;
+        app.package = pkgs.opencode;       # null 则 = 交互 bash
         app.binPath = "bin/opencode";
 
         packages = with pkgs; [ git ripgrep fd jq curl ];
-
         mounts.ro = [ "~/.config/opencode" ];
         mounts.rw = [];
 
-        workspace = {
-          strategy = "overlayfs";
-          baseDir = ".ocsb";
-          name = "_";
-        };
+        workspace = { strategy = "auto"; baseDir = ".ocsb"; name = "_"; };
 
-        # Filtered network: public internet OK, private ranges blocked
-        network.enable = true;
+        network.enable = true;             # 过滤模式
 
-        # Or: dual-layer (experimental)
-        # experimental.dualLayer = true;
-
-        env = {
-          EDITOR = "cat";
-          LANG = "C.UTF-8";
-        };
+        env = { EDITOR = "cat"; LANG = "C.UTF-8"; };
       });
-    };
+  };
 }
 ```
 
-## Module Options
+完整选项：见 `modules/{app,packages,env,mounts,workspace,network,experimental}.nix`。
 
-### Core
+要包装其他程序：复用 `templates/opencode.nix` 或 `templates/ironclaw.nix` 当作模板修改即可。
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `app.name` | string | `"ocsb"` | Sandbox executable name |
-| `app.package` | package \| null | `null` | Package to sandbox (`null` = interactive bash) |
-| `app.binPath` | string | `""` | Binary path within package |
-| `packages` | list of packages | `[]` | Packages available inside sandbox |
-| `env` | attrset | `{}` | Environment variables inside sandbox |
+## Ironclaw 专用说明
 
-### Mounts
+每个版本独立 flake input + 独立持久化目录。
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `mounts.ro` | list of strings | `[]` | Read-only bind mounts (`~` maps to `/home/sandbox`) |
-| `mounts.rw` | list of strings | `[]` | Read-write bind mounts |
+**持久化路径**（首次启动自动初始化 postgres + pgvector，在沙箱内 unix socket 上跑）：
+- 最新版：`~/.cache/ocsb/ironclaw/<workspace>/`
+- 老版本：`~/.cache/ocsb/ironclaw_v0_XX_X/<workspace>/`
 
-### Workspace
+覆盖：`OCSB_IRONCLAW_PERSIST_DIR=/path` 或 `--persist-dir /path`。
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `workspace.strategy` | enum | `"auto"` | `auto` (detect btrfs, fallback overlayfs), `overlayfs`, `btrfs`, `git-worktree`, or `direct` |
-| `workspace.baseDir` | string | `".ocsb"` | Base directory for workspaces (relative to project) |
-| `workspace.name` | string | `"_"` | Default workspace name |
+**沙箱内 nix**：`OCSB_IRONCLAW_NIX_MODE=` 选 `single-user`（默认，纯用户态）/ `isolated-store`（overlay 在 closure store 上）/ `portable`（stub，需自行加 nix-portable input）。
 
-### Network
+**升级到新 release**（保留最近 3 个版本）：
+1. 在 `flake.nix` 把当前 `ironclaw-src` 改名为 `ironclaw-src-v0_XX_X`
+2. 删掉最老的 `ironclaw-src-v0_YY_Y`
+3. 新 `ironclaw-src.url = "github:nearai/ironclaw/ironclaw-vX.Y.Z"`
+4. 改 `ironclawVersions` 列表
+5. `nix flake update ironclaw-src` + `nix flake check --no-build`
+6. 如新版引入新 git deps，按 nix 报的 hash 加进 `pkgs/ironclaw.nix` 的 `allOutputHashes`
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `network.enable` | null \| bool | `null` | `null` = host network, `true` = filtered (slirp4netns), `false` = no network |
-| `network.blockedRanges` | list of strings | RFC1918 + link-local | CIDR ranges blocked by iptables in filtered mode |
+## 二进制缓存（cachix）
 
-### Experimental
+我们的 CI 把构建产物 push 到 `https://hugefiver.cachix.org`，命中即秒拉，避免本机花一小时编 ironclaw。
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `experimental.dualLayer` | bool | `false` | Dual-layer sandbox: outer has host network, tool commands run in inner sandbox with no network |
+**临时启用（单条命令）**：
+```bash
+nix build github:hugefiver/ocsb \
+  --extra-substituters https://hugefiver.cachix.org \
+  --extra-trusted-public-keys hugefiver.cachix.org-1:vFt540rDhQBn5n+NYG0OkBtae/Rj/Gk12DXUmBDeOM0=
+```
 
-## Network Isolation
+**用户级（个人 nix）**，在 `~/.config/nix/nix.conf` 加：
+```
+extra-substituters = https://hugefiver.cachix.org
+extra-trusted-public-keys = hugefiver.cachix.org-1:vFt540rDhQBn5n+NYG0OkBtae/Rj/Gk12DXUmBDeOM0=
+```
+要求当前用户在系统 `nix.settings.trusted-users` 里，否则 nix 会忽略 substituter。
 
-### Modes
+**NixOS 系统级**：
+```nix
+nix.settings.extra-substituters = [ "https://hugefiver.cachix.org" ];
+nix.settings.extra-trusted-public-keys = [
+  "hugefiver.cachix.org-1:vFt540rDhQBn5n+NYG0OkBtae/Rj/Gk12DXUmBDeOM0="
+];
+```
+`nixos-rebuild switch` 后立即生效，所有用户共享。
 
-- **Host** (`network.enable = null`, default) — shares the host network stack, no isolation
-- **Filtered** (`network.enable = true`) — slirp4netns provides NAT'd outbound internet; iptables blocks private/link-local ranges; capabilities dropped after firewall setup
-- **None** (`network.enable = false`) — `--unshare-net` only, no connectivity
+**一键工具**：`nix shell nixpkgs#cachix -c cachix use hugefiver`
 
-### Filtered Mode Security
-
-When `network.enable = true`:
-
-1. slirp4netns creates a TAP device with NAT and `--disable-host-loopback`
-2. iptables adds DROP rules for each `blockedRanges` entry (best-effort installation)
-3. All DROP rules are post-verified with `iptables -C` — if any fail and iptables is available, the sandbox aborts (fail-closed)
-4. If iptables is unavailable (e.g. WSL2 kernel restriction), isolation is still enforced by the network namespace + slirp4netns
-5. All capabilities are dropped via `setpriv --bounding-set=-all` before executing the payload
-
-### Dual-Layer Mode (Experimental)
-
-When `experimental.dualLayer = true`:
-
-- **Layer 1 (outer)**: filesystem isolation with host network — the main app (e.g. opencode) can reach LLM APIs
-- **Layer 2 (inner)**: `$SHELL` is replaced with a wrapper that runs every command in a nested bubblewrap with `--unshare-all` (no network, isolated namespaces)
-- Tool commands spawned by the app have no internet access and a minimal filesystem view
-- Only `$SHELL --version` and `$SHELL --help` pass through without inner isolation (for shell detection)
-
-## Workspace Strategies
-
-- **auto** (default) — detects filesystem at runtime: uses btrfs snapshot if project is on a btrfs subvolume, otherwise falls back to overlayfs.
-- **overlayfs** — overlay filesystem with project as lower, changes at `~/.cache/ocsb/<hash>/<name>/upper`.
-- **btrfs** — btrfs subvolume snapshot. Requires btrfs filesystem.
-- **git-worktree** — detached git worktree. Requires git repository. Git operations work inside sandbox.
-- **direct** — bind-mounts project directory directly (no isolation).
-
-### Per-Directory Mounts
-
-In addition to the workspace strategy, you can mount specific host directories with CoW isolation:
-
-- `--overlay-mount HOST:SANDBOX` — mounts a host directory into the sandbox using overlayfs (changes stored in `~/.cache/ocsb/`)
-- `--snap-mount HOST:SANDBOX` — mounts a host directory using a btrfs snapshot (requires source to be a btrfs subvolume)
-
-## Ironclaw template
-
-This repository now includes an `ironclaw` template for running [NEAR AI Ironclaw](https://github.com/nearai/ironclaw) (Rust + PostgreSQL + pgvector) inside an isolated ocsb bubblewrap sandbox.
-
-- Latest package: `.#ironclaw` / `.#ironclaw-sandbox` (`result/bin/ocsb-ironclaw`)
-- Versioned packages (last 3 releases tracked):
-  - `.#ironclaw_v0_26_0` / `.#ironclaw-sandbox_v0_26_0` (latest, alias of `.#ironclaw{,-sandbox}`)
-  - `.#ironclaw_v0_25_0` / `.#ironclaw-sandbox_v0_25_0`
-  - `.#ironclaw_v0_24_0` / `.#ironclaw-sandbox_v0_24_0`
-
-Each version has its own pinned `flake` input (`ironclaw-src`, `ironclaw-src-v0_25_0`, `ironclaw-src-v0_24_0`) and independent persistence root.
-
-#### Bumping to a new release
-
-1. Find the new tag on https://github.com/nearai/ironclaw/releases
-2. Demote the current `ironclaw-src` (latest) to a versioned input (e.g. `ironclaw-src-v0_26_0`).
-3. Drop the oldest versioned input (e.g. `ironclaw-src-v0_24_0`) so only the last 3 are tracked.
-4. Point `ironclaw-src` at the new tag: `github:nearai/ironclaw/ironclaw-vX.Y.Z`.
-5. Update `ironclawVersions` in `flake.nix` (latest first).
-6. `nix flake update ironclaw-src` (and the new versioned input).
-7. `nix flake check --no-build` — if a new release introduces git deps not in `pkgs/ironclaw.nix` `allOutputHashes`, add the new entries (run a build to discover the missing hashes; nix prints them).
-
-### Persistence
-
-Per-version state under:
-
-- latest: `~/.cache/ocsb/ironclaw/<workspace>/`
-- versioned: `~/.cache/ocsb/ironclaw_v0_XX_X/<workspace>/`
-
-Override with either:
-
-- `OCSB_IRONCLAW_PERSIST_DIR=/absolute/path`
-- `--persist-dir /absolute/path`
-
-The host-side wrapper bind-mounts persistence subdirectories into the sandbox (home, postgres data/run dirs, ironclaw data dir, nix store dirs) before launch.
-
-### Nix modes
-
-Select mode with `OCSB_IRONCLAW_NIX_MODE`:
-
-- `single-user` (default) — keeps Nix state under `$HOME/.local/nix/{store,var}`. Pure user-mode, no daemon.
-- `isolated-store` — overlays a persistent upper layer over the closure-only `/nix/store`. Closest to "real Nix" while staying isolated from host.
-- `portable` — stub; requires adding `DavHau/nix-portable` as a flake input (not packaged in nixpkgs).
-
-A user-level `nix.conf` is generated at `$HOME/.config/nix/nix.conf` with:
-`experimental-features = nix-command flakes`, `build-users-group = ` (empty),
-`sandbox = false`, `cache.nixos.org` substituter, `accept-flake-config = true`.
-
-### TUN integration
-
-Filtered networking works with host-side TUN setups (e.g. Clash Verge Rev / Mihomo TUN mode). `network.tunDevice` (default: `"Mihomo"`) is currently informational and reserved for future sandbox-side TUN integration.
-
-### Postgres + pgvector
-
-The template uses `postgresql_18` with `pgvector` and starts PostgreSQL inside the sandbox on a Unix socket only (`/run/postgresql`). TCP listening is disabled.
-
-### Security model
-
-The runtime pipeline executes as the non-root host user. In filtered mode, sandbox setup briefly uses internal uid=0 to install firewall rules, then drops all capabilities and returns to host uid/gid before running the payload.
-
-## Tests
+## 测试
 
 ```bash
-# Build default package
 nix build .#packages.x86_64-linux.default
-
-# CLI, workspace, mounts
 bash tests/test_wrapper.sh ./result/bin/ocsb
-
-# app.package binary path
 bash tests/test_binpath.sh .
-
-# git-worktree strategy
 bash tests/test_git_worktree.sh ./result/bin/ocsb
+bash tests/test_btrfs.sh ./result/bin/ocsb     # 无权限自动 SKIP
 
-# Sandbox-internal tests (runs inside sandbox)
-./result/bin/ocsb --strategy direct --overwrite -- bash /workspace/tests/test_sandbox.sh
+nix build .#checks.x86_64-linux.net-test
+nix build .#checks.x86_64-linux.dual-layer-test
 
-# Network tests (requires network.enable = true build)
-nix-build tests/net-test.nix -o result-net
-./result-net/bin/ocsb-net-test --strategy direct --overwrite -- bash /workspace/tests/test_network.sh
-
-# Dual-layer tests (requires experimental.dualLayer = true build)
-nix-build tests/dual-layer-test.nix -o result-dual
-./result-dual/bin/ocsb-dual-test --strategy direct --overwrite -- bash /workspace/tests/test_dual_layer.sh
+nix build .#ironclaw-sandbox
+bash tests/test_ironclaw.sh ./result/bin/ocsb-ironclaw
 ```
 
 ## License
