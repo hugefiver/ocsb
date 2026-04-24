@@ -7,6 +7,7 @@
     name = "ironclaw";
     package = ironclawPackage;
     binPath = "bin/ironclaw";
+    runAsRoot = false;
     preExecHook = ''
       set -euo pipefail
 

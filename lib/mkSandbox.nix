@@ -681,8 +681,8 @@ let
       --new-session
       --clearenv
 
-      ${if networkMode == "filtered" && !dualLayerEnabled then ''
-      # Filtered mode: uid 0 for CAP_NET_ADMIN (iptables best-effort).
+      ${if networkMode == "filtered" && !dualLayerEnabled && cfg.app.runAsRoot then ''
+      # Filtered mode + runAsRoot: uid 0 for CAP_NET_ADMIN (iptables best-effort).
       # uid 0 inside a user namespace has NO host privileges.
       --uid 0
       --gid 0
