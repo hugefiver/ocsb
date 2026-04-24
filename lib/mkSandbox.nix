@@ -811,6 +811,9 @@ let
     # Determine sandbox command
     # =========================================================
     SANDBOX_CMD=()
+    if [[ -n "''${OCSB_EXEC_OVERRIDE:-}" && $# -gt 0 ]]; then
+      SANDBOX_CMD=("$@")
+    else
     ${if cfg.app.package != null then ''
     SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
     '' else ''
@@ -824,6 +827,7 @@ let
       SANDBOX_CMD=(${lib.escapeShellArg appExec})
     fi
     ''}
+    fi
 
     ${lib.optionalString (preExecScript != null) ''
     SANDBOX_CMD=(${preExecScript} "''${SANDBOX_CMD[@]}")
