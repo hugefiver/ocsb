@@ -86,6 +86,17 @@ in
 
       mkdir -p /var/lib/ironclaw
       export IRONCLAW_DATA_DIR=/var/lib/ironclaw
+
+      # Persist a SECRETS_MASTER_KEY so the onboard wizard skips the keychain
+      # step (no D-Bus secret service inside the sandbox). 32 random bytes
+      # hex-encoded = 64 chars; ironclaw treats env-var presence as authoritative
+      # and returns early from step_security().
+      _MK_FILE=/var/lib/ironclaw/master_key.hex
+      if [ ! -s "$_MK_FILE" ]; then
+        ${pkgs.openssl}/bin/openssl rand -hex 32 > "$_MK_FILE"
+        chmod 0600 "$_MK_FILE"
+      fi
+      export SECRETS_MASTER_KEY="$(cat "$_MK_FILE")"
     '';
   };
 
