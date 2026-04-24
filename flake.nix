@@ -78,15 +78,49 @@
             set -euo pipefail
 
             VARIANT="ironclaw${slug}"
-            WORKSPACE_NAME="$VARIANT"
             PERSIST_DIR=""
             FILTERED_ARGS=()
 
+            usage() {
+              cat <<EOF
+            Usage: ocsb-$VARIANT [OPTIONS] [-- COMMAND...]
+
+            Run NEAR AI Ironclaw inside an isolated ocsb sandbox with persistent
+            postgres + pgvector and a sandboxed Nix environment.
+
+            Options:
+              --persist-dir DIR     Override persistent state directory.
+                                    Default: \$HOME/.cache/ocsb/ironclaw
+                                    (shared across all ironclaw variants).
+              -w, --workspace NAME  Workspace name (passed through to ocsb).
+              -h, --help            Show this help and exit.
+              --                    Pass remaining args to ironclaw / shell.
+
+            Environment:
+              OCSB_IRONCLAW_PERSIST_DIR  Same as --persist-dir.
+
+            Persistent layout (under \$PERSIST_DIR):
+              home/        \$HOME inside sandbox (config, history)
+              data/        ironclaw application data
+              pgdata/      PostgreSQL 18 cluster
+              pgrun/       postgres unix socket
+              nix-user/    nix-portable / single-user state
+              nix-store/   isolated-store overlay upper layer
+
+            First run will: initdb, start postgres on unix socket, create
+            'ironclaw' DB + load pgvector, then exec ironclaw. Run
+            \`ironclaw onboard\` inside the sandbox to configure account.
+            EOF
+            }
+
             while [[ $# -gt 0 ]]; do
               case "$1" in
+                -h|--help)
+                  usage
+                  exit 0
+                  ;;
                 -w|--workspace)
                   [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
-                  WORKSPACE_NAME="$2"
                   FILTERED_ARGS+=("$1" "$2")
                   shift 2
                   ;;
@@ -115,7 +149,7 @@
               if [[ -n "''${OCSB_IRONCLAW_PERSIST_DIR:-}" ]]; then
                 PERSIST_DIR="$OCSB_IRONCLAW_PERSIST_DIR"
               else
-                PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT/$WORKSPACE_NAME"
+                PERSIST_DIR="$HOME/.cache/ocsb/ironclaw"
               fi
             fi
 
