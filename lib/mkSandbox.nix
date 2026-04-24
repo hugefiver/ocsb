@@ -860,11 +860,11 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
 
     # Environment
     BWRAP_ARGS+=(
-  --setenv HOME /home/sandbox
-  --setenv PATH /usr/bin
-  --setenv TERM "''${TERM:-xterm-256color}"
-  --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-  --setenv SANDBOX 1
+      --setenv HOME /home/sandbox
+      --setenv PATH ${sandboxPath}
+      --setenv TERM "''${TERM:-xterm-256color}"
+      --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      --setenv SANDBOX 1
       --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
       --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
       --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
