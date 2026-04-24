@@ -5,6 +5,11 @@ WRAPPER="${1:?Usage: $0 <path-to-ocsb-ironclaw-binary>}"
 PERSIST_DIR="$(mktemp -d)"
 trap 'rm -rf "$PERSIST_DIR"' EXIT
 
+if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+  echo "SKIP: GitHub Actions runners restrict bwrap netns (RTM_NEWADDR)"
+  exit 0
+fi
+
 echo "=== ironclaw sandbox test ==="
 
 echo "--- wrapper + binary version smoke ---"
