@@ -2,6 +2,10 @@
 
 { ... }:
 
+let
+  pg = pkgs.postgresql_18;
+  pgvector = pg.pkgs.pgvector;
+in
 {
   app = {
     name = "ironclaw";
@@ -60,29 +64,34 @@
       mkdir -p "$PGRUN"
       chmod 0700 "$PGDATA" 2>/dev/null || true
 
-      # postgresql.withPackages wraps binaries; PGSHAREDIR/PGLIBDIR resolution
-      # via argv[0] lands in the buildEnv (no share/lib). Point them at the
-      # real postgres derivation so initdb/postgres find postgres.bki + extensions.
-      _PG_REAL="$(readlink -f "$(command -v postgres)")"
-      _PG_PREFIX="$(dirname "$(dirname "$_PG_REAL")")"
-      export PGSHAREDIR="$_PG_PREFIX/share/postgresql"
-      export PGLIBDIR="$_PG_PREFIX/lib"
+      # Use raw postgres binary directly (avoid postgres-and-plugins buildEnv
+      # wrapper which breaks --inherit-argv0 path resolution).
+      _PG_BIN="${pg}/bin"
+      _PG_SHARE="${pg}/share/postgresql"
+      _PGVECTOR_LIB="${pgvector}/lib"
+      _PGVECTOR_SHARE="${pgvector}/share/postgresql/extension"
 
       if [ ! -f "$PGDATA/PG_VERSION" ]; then
         echo "[ironclaw] initializing postgres cluster..."
-        initdb -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)" -L "$PGSHAREDIR"
+        "$_PG_BIN/initdb" -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)"
+        # Make pgvector visible: load .so from pgvector lib, find SQL/control
+        # files via dynamic_library_path + extension_control_path.
+        cat >> "$PGDATA/postgresql.conf" <<EOF
+      dynamic_library_path = '$_PGVECTOR_LIB:\$libdir'
+      extension_control_path = '$_PGVECTOR_SHARE:\$system'
+      EOF
       fi
 
-      pg_ctl -D "$PGDATA" -l "$HOME/postgres.log" -w \
+      "$_PG_BIN/pg_ctl" -D "$PGDATA" -l "$HOME/postgres.log" -w \
         -o "-k $PGRUN -h ''' -c listen_addresses='''" \
         start
 
-      trap 'pg_ctl -D "$PGDATA" -m fast stop || true' EXIT
+      trap '"$_PG_BIN/pg_ctl" -D "$PGDATA" -m fast stop || true' EXIT
 
-      if ! psql -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
-        createdb -h "$PGRUN" ironclaw
+      if ! "$_PG_BIN/psql" -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
+        "$_PG_BIN/createdb" -h "$PGRUN" ironclaw
       fi
-      psql -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       mkdir -p /var/lib/ironclaw
       export IRONCLAW_DATA_DIR=/var/lib/ironclaw
@@ -103,7 +112,8 @@
     curl
     # If pgvector is unavailable for postgresql_18 in your pinned nixpkgs,
     # fall back to postgresql_17.withPackages (p: [ p.pgvector ]).
-    (postgresql_18.withPackages (p: [ p.pgvector ]))
+    pg
+    pgvector
     nix
     cacert
     openssl
