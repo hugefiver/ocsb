@@ -97,6 +97,9 @@
               -w, --workspace NAME  Workspace name (passed through to ocsb).
               -s, --shell           Drop into bash inside the sandbox instead
                                     of starting ironclaw (postgres still set up).
+              --attach              Attach to the currently-running sandbox
+                                    instance (shares its postgres, env, mounts).
+                                    Use --attach=PID to target a specific bwrap.
               -h, --help            Show this help and exit.
               --                    Pass remaining args to ironclaw / shell.
 

@@ -231,6 +231,71 @@ let
     set -euo pipefail
 
     # =========================================================
+    # --attach: enter namespaces of the currently-running sandbox
+    # of this same app. Detected anywhere in args; bypasses every
+    # other launcher behavior (no preExecHook, no service start,
+    # no fresh bwrap). Use this when you need a shell inside the
+    # SAME instance (e.g. to query a postgres that's already up).
+    # =========================================================
+    _ATTACH_TARGET=""
+    for _arg in "$@"; do
+      case "$_arg" in
+        --attach) _ATTACH_TARGET="auto"; break ;;
+        --attach=*) _ATTACH_TARGET="''${_arg#--attach=}"; break ;;
+      esac
+    done
+
+    if [[ -n "$_ATTACH_TARGET" ]]; then
+      _PIDFILE="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/${cfg.app.name}.pid"
+      _BWRAP_PID=""
+      if [[ "$_ATTACH_TARGET" == "auto" ]]; then
+        if [[ ! -e "$_PIDFILE" ]]; then
+          echo "ocsb: no running ${cfg.app.name} instance (pidfile $_PIDFILE missing)" >&2
+          echo "ocsb: launch the sandbox first, or pass --attach=<bwrap-pid>" >&2
+          exit 1
+        fi
+        _BWRAP_PID=$(${pkgs.coreutils}/bin/cat "$_PIDFILE")
+      else
+        _BWRAP_PID="$_ATTACH_TARGET"
+      fi
+      if ! kill -0 "$_BWRAP_PID" 2>/dev/null; then
+        echo "ocsb: no live process at PID $_BWRAP_PID (stale pidfile?)" >&2
+        [[ -e "$_PIDFILE" ]] && ${pkgs.coreutils}/bin/rm -f "$_PIDFILE"
+        exit 1
+      fi
+      # bwrap forks the sandbox init as its only child; that child
+      # holds the user/mount/pid/etc namespaces we want to enter.
+      _INIT_PID=$(${pkgs.procps}/bin/pgrep -P "$_BWRAP_PID" | ${pkgs.coreutils}/bin/head -n1 || true)
+      if [[ -z "$_INIT_PID" ]]; then
+        echo "ocsb: bwrap PID $_BWRAP_PID has no child process to attach to" >&2
+        exit 1
+      fi
+      # Inner shell: inherit sandbox PID 1's env (preExecHook exports
+      # like SECRETS_MASTER_KEY, DATABASE_URL, PATH, etc.), cd into
+      # workspace, then drop into interactive bash.
+      _INNER_SCRIPT='while IFS= read -r -d "" _line; do
+  _k="''${_line%%=*}"
+  _v="''${_line#*=}"
+  [[ -n "$_k" && "$_k" != "_" ]] && export "$_k=$_v" 2>/dev/null || true
+done < /proc/1/environ
+cd /workspace 2>/dev/null || cd /home/sandbox 2>/dev/null || cd /
+exec ${pkgs.bashInteractive}/bin/bash -i'
+      exec ${pkgs.util-linux}/bin/nsenter \
+        -t "$_INIT_PID" \
+        -U --preserve-credentials \
+        -m -p -i -u -n \
+        -- ${pkgs.bashInteractive}/bin/bash -c "$_INNER_SCRIPT"
+    fi
+
+    # Record this launcher pid so future --attach can find us.
+    # After `exec bwrap` further down the script, this pid IS the
+    # bwrap pid (exec preserves pid). Stale entries are tolerated:
+    # readers validate with `kill -0` and clean them up.
+    _PIDFILE_DIR="''${XDG_RUNTIME_DIR:-/tmp}/ocsb"
+    ${pkgs.coreutils}/bin/mkdir -p "$_PIDFILE_DIR"
+    echo $$ > "$_PIDFILE_DIR/${cfg.app.name}.pid"
+
+    # =========================================================
     # Helper: resolve ~ in paths at runtime
     # =========================================================
 
