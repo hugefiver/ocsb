@@ -3,8 +3,7 @@
 { ... }:
 
 let
-  pg = pkgs.postgresql_18;
-  pgvector = pg.pkgs.pgvector;
+  pgWithExt = pkgs.postgresql_18.withPackages (p: [ p.pgvector ]);
 in
 {
   app = {
@@ -64,22 +63,14 @@ in
       mkdir -p "$PGRUN"
       chmod 0700 "$PGDATA" 2>/dev/null || true
 
-      # Use raw postgres binary directly (avoid postgres-and-plugins buildEnv
-      # wrapper which breaks --inherit-argv0 path resolution).
-      _PG_BIN="${pg}/bin"
-      _PG_SHARE="${pg}/share/postgresql"
-      _PGVECTOR_LIB="${pgvector}/lib"
-      _PGVECTOR_SHARE="${pgvector}/share/postgresql/extension"
+      # Use postgresql.withPackages buildEnv: pgvector is installed under
+      # PG's default share/postgresql/extension and lib paths, found via
+      # compile-time prefix. No extension_control_path needed.
+      _PG_BIN="${pgWithExt}/bin"
 
       if [ ! -f "$PGDATA/PG_VERSION" ]; then
         echo "[ironclaw] initializing postgres cluster..."
         "$_PG_BIN/initdb" -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)"
-        # Make pgvector visible: load .so from pgvector lib, find SQL/control
-        # files via dynamic_library_path + extension_control_path.
-        cat >> "$PGDATA/postgresql.conf" <<EOF
-      dynamic_library_path = '$_PGVECTOR_LIB:\$libdir'
-      extension_control_path = '$_PGVECTOR_SHARE:\$system'
-      EOF
       fi
 
       "$_PG_BIN/pg_ctl" -D "$PGDATA" -l "$HOME/postgres.log" -w \
@@ -91,8 +82,6 @@ in
       if ! "$_PG_BIN/psql" -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
         "$_PG_BIN/createdb" -h "$PGRUN" ironclaw
       fi
-      "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "SHOW extension_control_path; SHOW dynamic_library_path; SELECT * FROM pg_available_extensions WHERE name LIKE '%vec%' OR name = 'plpgsql';" >&2
-      ls -la "$_PGVECTOR_SHARE" >&2 || true
       "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       mkdir -p /var/lib/ironclaw
@@ -114,8 +103,7 @@ in
     curl
     # If pgvector is unavailable for postgresql_18 in your pinned nixpkgs,
     # fall back to postgresql_17.withPackages (p: [ p.pgvector ]).
-    pg
-    pgvector
+    pgWithExt
     nix
     cacert
     openssl
