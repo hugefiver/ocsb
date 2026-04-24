@@ -60,9 +60,17 @@
       mkdir -p "$PGRUN"
       chmod 0700 "$PGDATA" 2>/dev/null || true
 
+      # postgresql.withPackages wraps binaries; PGSHAREDIR/PGLIBDIR resolution
+      # via argv[0] lands in the buildEnv (no share/lib). Point them at the
+      # real postgres derivation so initdb/postgres find postgres.bki + extensions.
+      _PG_REAL="$(readlink -f "$(command -v postgres)")"
+      _PG_PREFIX="$(dirname "$(dirname "$_PG_REAL")")"
+      export PGSHAREDIR="$_PG_PREFIX/share/postgresql"
+      export PGLIBDIR="$_PG_PREFIX/lib"
+
       if [ ! -f "$PGDATA/PG_VERSION" ]; then
         echo "[ironclaw] initializing postgres cluster..."
-        initdb -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)"
+        initdb -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)" -L "$PGSHAREDIR"
       fi
 
       pg_ctl -D "$PGDATA" -l "$HOME/postgres.log" -w \
