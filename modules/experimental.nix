@@ -29,5 +29,31 @@
         commands (e.g. opencode reads $SHELL for its bash tool).
       '';
     };
+
+    nixStoreOverlay = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Mount /nix/store as a writable overlayfs (instead of the default
+        closure-only read-only mounts).
+
+        Layout:
+        - lower: host /nix/store (read-only)
+        - upper: $OVERLAY_STATE_DIR/nix-store-upper (per-workspace, persistent)
+        - work:  $OVERLAY_STATE_DIR/nix-store-work
+
+        Effects:
+        - `nix profile add` works inside the sandbox; cache.nixos.org binaries
+          are usable because the store prefix is /nix/store on both sides.
+        - Installed paths persist across runs of the same workspace and are
+          discarded on `--reset`.
+
+        Tradeoffs:
+        - The entire host /nix/store is visible inside the sandbox (read-only
+          via the lower layer), not just the package's transitive closure.
+        - Slightly more kernel overhead per syscall on /nix/store than direct
+          bind mounts.
+      '';
+    };
   };
 }

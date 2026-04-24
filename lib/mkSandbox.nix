@@ -795,10 +795,21 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       --symlink /usr/bin /bin
     )
 
-    # Closure-only /nix/store mounts: mount each store path individually
-    while IFS= read -r storePath; do
-      BWRAP_ARGS+=(--ro-bind "$storePath" "$storePath")
-    done < ${closureInfoDrv}/store-paths
+    # /nix/store layout
+    ${if cfg.experimental.nixStoreOverlay then ''
+      # Writable overlay: lower = host /nix/store, upper = per-workspace
+      ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/nix-store-upper" "$OVERLAY_STATE_DIR/nix-store-work"
+      BWRAP_ARGS+=(
+        --overlay-src /nix/store
+        --overlay "$OVERLAY_STATE_DIR/nix-store-upper" "$OVERLAY_STATE_DIR/nix-store-work" /nix/store
+      )
+      echo "ocsb: /nix/store overlay enabled (upper: $OVERLAY_STATE_DIR/nix-store-upper)" >&2
+    '' else ''
+      # Closure-only /nix/store mounts: mount each store path individually
+      while IFS= read -r storePath; do
+        BWRAP_ARGS+=(--ro-bind "$storePath" "$storePath")
+      done < ${closureInfoDrv}/store-paths
+    ''}
 
     # User-configured read-only mounts (resolved at runtime for ~ expansion)
     ${mkMountArrayEntries "--ro-bind-try" cfg.mounts.ro}
