@@ -102,6 +102,7 @@ jobs:
         with:
           name: hugefiver
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          pushFilter: ".*"
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
         continue-on-error: true
