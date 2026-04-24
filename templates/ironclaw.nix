@@ -91,7 +91,8 @@ in
       if ! "$_PG_BIN/psql" -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
         "$_PG_BIN/createdb" -h "$PGRUN" ironclaw
       fi
-      "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "SHOW extension_control_path; SHOW dynamic_library_path;" >&2
+      "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "SHOW extension_control_path; SHOW dynamic_library_path; SELECT * FROM pg_available_extensions WHERE name LIKE '%vec%' OR name = 'plpgsql';" >&2
+      ls -la "$_PGVECTOR_SHARE" >&2 || true
       "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       mkdir -p /var/lib/ironclaw
