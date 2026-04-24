@@ -40,19 +40,20 @@
 
     preserveCtty = lib.mkOption {
       type = lib.types.bool;
-      default = false;
+      default = true;
       description = ''
-        If true, omit bwrap's --new-session flag so the sandboxed process
-        inherits the controlling tty. Required for interactive TUI apps
-        (e.g. ironclaw onboard wizard, plain --shell bash) — without ctty,
+        If true (default), omit bwrap's --new-session flag so the sandboxed
+        process inherits the controlling tty. Required for interactive TUI
+        apps (ironclaw onboard wizard, --shell bash) — without ctty,
         readline/raw-mode input sees EOF and the app exits or auto-skips
         prompts.
 
-        Security tradeoff: --new-session prevents TIOCSTI ioctl injection
-        from inside the sandbox into the host tty. Modern kernels (>= 5.17)
-        restrict TIOCSTI by default (dev.tty.legacy_tiocsti_restrict=1),
-        making this mitigation largely redundant. Keep false (default) for
-        non-interactive or non-TUI workloads.
+        Set false to enable bwrap's --new-session, which calls setsid() to
+        prevent TIOCSTI ioctl injection from inside the sandbox into the
+        host tty. Modern kernels (>= 5.17) restrict TIOCSTI by default
+        (dev.tty.legacy_tiocsti_restrict=1), making this mitigation largely
+        redundant. Only set false for non-interactive batch workloads on
+        older kernels where you explicitly want this hardening.
       '';
     };
 
