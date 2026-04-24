@@ -40,17 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Rust + wasmtime + ruff is huge; reclaim ~30GB before nix store fills.
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          swap-storage: false
-
       - uses: DeterminateSystems/nix-installer-action@main
 
       - uses: DeterminateSystems/magic-nix-cache-action@main
@@ -62,8 +51,8 @@ jobs:
       - name: Build ironclaw-sandbox (latest)
         run: nix build .#packages.x86_64-linux.ironclaw-sandbox --print-build-logs
 
-      - name: Run ironclaw-test check
-        run: nix build .#checks.x86_64-linux.ironclaw-test --print-build-logs
+      - name: Run ironclaw-test smoke
+        run: bash tests/test_ironclaw.sh ./result/bin/ocsb-ironclaw
 
   ironclaw-versions:
     runs-on: ubuntu-latest
@@ -76,16 +65,6 @@ jobs:
         version: [v0_25_0, v0_24_0]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          swap-storage: false
 
       - uses: DeterminateSystems/nix-installer-action@main
 

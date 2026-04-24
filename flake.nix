@@ -189,13 +189,6 @@
             mounts.ro = [];
             mounts.rw = [];
           });
-
-          ironclaw-test = pkgs.runCommand "ocsb-ironclaw-test" {
-            nativeBuildInputs = with pkgs; [ bash nix ];
-          } ''
-            ${pkgs.bash}/bin/bash ${./tests/test_ironclaw.sh}
-            touch "$out"
-          '';
         }
       );
 

@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(pwd)"
-
-echo "=== ironclaw sandbox test ==="
-
-echo "--- build ironclaw package ---"
-nix build .#ironclaw
-
-echo "--- build ironclaw sandbox wrapper ---"
-nix build .#ironclaw-sandbox
-
-WRAPPER="$ROOT/result/bin/ocsb-ironclaw"
+WRAPPER="${1:?Usage: $0 <path-to-ocsb-ironclaw-binary>}"
 PERSIST_DIR="$(mktemp -d)"
 trap 'rm -rf "$PERSIST_DIR"' EXIT
+
+echo "=== ironclaw sandbox test ==="
 
 echo "--- wrapper + binary version smoke ---"
 "$WRAPPER" --strategy direct --overwrite --persist-dir "$PERSIST_DIR" -- ironclaw --version
@@ -25,7 +17,7 @@ if [[ -z "$VECTOR_VERSION" ]]; then
   exit 1
 fi
 
-echo "--- nix command check (portable default mode) ---"
+echo "--- nix command check ---"
 "$WRAPPER" --strategy direct --continue --persist-dir "$PERSIST_DIR" -- bash -lc "nix --version >/dev/null"
 
 echo "--- filtered network private range blocked ---"
