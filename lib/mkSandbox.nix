@@ -490,6 +490,137 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       ''}
     }
 
+    build_workspace_strategy_flags() {
+      STRATEGY_FLAGS=()
+
+      case "$WORKSPACE_STRATEGY" in
+        overlayfs)
+          ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
+          STRATEGY_FLAGS=(
+            --overlay-src "$PROJECT_DIR"
+            --overlay "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work" /workspace
+          )
+          echo "ocsb: overlay workspace at $OVERLAY_STATE_DIR" >&2
+          ;;
+        direct)
+          STRATEGY_FLAGS=(
+            --bind "$PROJECT_DIR" /workspace
+          )
+          echo "ocsb: direct mount (read-write, no isolation)" >&2
+          ;;
+        btrfs)
+          # btrfs strategy: create a snapshot of the project directory as workspace
+          BTRFS_SNAP="$WS_DIR/snapshot"
+          if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$BTRFS_SNAP" ]]; then
+            echo "ocsb: reusing btrfs snapshot at $BTRFS_SNAP" >&2
+          else
+            # Check if project dir is on btrfs and we can manage subvolumes
+            if ! _btrfs_probe "$PROJECT_DIR"; then
+              echo "ocsb: btrfs strategy unavailable: $_btrfs_probe_reason" >&2
+              echo "  Hint: ensure project dir is on btrfs and the filesystem is mounted with 'user_subvol_rm_allowed'." >&2
+              exit 1
+            fi
+            # Create a read-write snapshot of the project directory
+            if [[ -d "$BTRFS_SNAP" ]]; then
+              ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$BTRFS_SNAP" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$BTRFS_SNAP"
+            fi
+            ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$PROJECT_DIR" "$BTRFS_SNAP"
+            echo "ocsb: created btrfs snapshot at $BTRFS_SNAP" >&2
+          fi
+          STRATEGY_FLAGS=(
+            --bind "$BTRFS_SNAP" /workspace
+          )
+          ;;
+        git-worktree)
+          # git-worktree strategy: create a worktree for the workspace
+          GWT_DIR="$WS_DIR/worktree"
+          if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$GWT_DIR" ]]; then
+            echo "ocsb: reusing git worktree at $GWT_DIR" >&2
+          else
+            # Verify we're in a git repo
+            if ! ${pkgs.git}/bin/git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+              echo "ocsb: git-worktree strategy requires project directory to be a git repository" >&2
+              exit 1
+            fi
+            # Remove existing worktree if present
+            if [[ -d "$GWT_DIR" ]]; then
+              ${pkgs.git}/bin/git -C "$PROJECT_DIR" worktree remove --force "$GWT_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$GWT_DIR"
+            fi
+            # Create a detached worktree from HEAD
+            ${pkgs.git}/bin/git -C "$PROJECT_DIR" worktree add --detach "$GWT_DIR" HEAD
+            echo "ocsb: created git worktree at $GWT_DIR" >&2
+          fi
+          STRATEGY_FLAGS=(
+            --bind "$GWT_DIR" /workspace
+          )
+          ;;
+        *)
+          echo "ocsb: unknown strategy: $WORKSPACE_STRATEGY" >&2
+          exit 1
+          ;;
+      esac
+    }
+
+    append_workspace_mount_args() {
+      # User-configured read-only mounts (resolved at runtime for ~ expansion)
+      ${mkMountArrayEntries "--ro-bind-try" cfg.mounts.ro}
+
+      # User-configured read-write mounts
+      ${mkMountArrayEntries "--bind-try" cfg.mounts.rw}
+
+      # Workspace strategy mounts (must come before runtime mounts so /workspace exists)
+      BWRAP_ARGS+=("''${STRATEGY_FLAGS[@]}")
+
+      # Runtime CLI mounts (--ro / --rw flags) — after strategy so /workspace is available
+      if [[ ''${#RUNTIME_MOUNTS[@]} -gt 0 ]]; then
+        BWRAP_ARGS+=("''${RUNTIME_MOUNTS[@]}")
+      fi
+
+      # Per-directory overlay mounts (--overlay-mount HOST:SANDBOX)
+      _OVL_IDX=0
+      while [[ $_OVL_IDX -lt ''${#OVERLAY_MOUNTS[@]} ]]; do
+        _OVL_HOST="''${OVERLAY_MOUNTS[$_OVL_IDX]}"
+        _OVL_SANDBOX="''${OVERLAY_MOUNTS[$_OVL_IDX+1]}"
+        _OVL_HASH="$(echo -n "$_OVL_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
+        _OVL_STATE="$OVERLAY_STATE_DIR/ovl-$_OVL_HASH"
+        ${pkgs.coreutils}/bin/mkdir -p "$_OVL_STATE/upper" "$_OVL_STATE/work"
+        BWRAP_ARGS+=(--overlay-src "$_OVL_HOST" --overlay "$_OVL_STATE/upper" "$_OVL_STATE/work" "$_OVL_SANDBOX")
+        echo "ocsb: overlay mount $_OVL_HOST -> $_OVL_SANDBOX (state: $_OVL_STATE)" >&2
+        _OVL_IDX=$((_OVL_IDX + 2))
+      done
+
+      # Per-directory snapshot mounts (--snap-mount HOST:SANDBOX)
+      _SNAP_IDX=0
+      while [[ $_SNAP_IDX -lt ''${#SNAP_MOUNTS[@]} ]]; do
+        _SNAP_HOST="''${SNAP_MOUNTS[$_SNAP_IDX]}"
+        _SNAP_SANDBOX="''${SNAP_MOUNTS[$_SNAP_IDX+1]}"
+        _SNAP_HASH="$(echo -n "$_SNAP_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
+        _SNAP_DIR="$OVERLAY_STATE_DIR/snap-$_SNAP_HASH"
+        if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$_SNAP_DIR" ]]; then
+          echo "ocsb: reusing snapshot $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
+        else
+          # Detect btrfs subvolume by inode (subvol roots have inode 256)
+          _SNAP_INO="$(${pkgs.coreutils}/bin/stat -c %i "$_SNAP_HOST" 2>/dev/null || echo 0)"
+          if [[ "$_SNAP_INO" != "256" ]]; then
+            echo "ocsb: error: --snap-mount source must be a btrfs subvolume root: $_SNAP_HOST" >&2
+            exit 1
+          fi
+          if [[ -d "$_SNAP_DIR" ]]; then
+            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_SNAP_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_SNAP_DIR"
+          fi
+          ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$_SNAP_HOST" "$_SNAP_DIR"
+          echo "ocsb: snapshot mount $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
+        fi
+        BWRAP_ARGS+=(--bind "$_SNAP_DIR" "$_SNAP_SANDBOX")
+        _SNAP_IDX=$((_SNAP_IDX + 2))
+      done
+
+      # Git metadata mounts (for gitfile-backed repos)
+      if [[ ''${#GIT_METADATA_FLAGS[@]} -gt 0 ]]; then
+        BWRAP_ARGS+=("''${GIT_METADATA_FLAGS[@]}")
+      fi
+    }
+
     # =========================================================
     # Runtime argument parsing
     # =========================================================
@@ -796,74 +927,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # =========================================================
     # Strategy-specific flags
     # =========================================================
-    STRATEGY_FLAGS=()
-
-    case "$WORKSPACE_STRATEGY" in
-      overlayfs)
-        ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
-        STRATEGY_FLAGS=(
-          --overlay-src "$PROJECT_DIR"
-          --overlay "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work" /workspace
-        )
-        echo "ocsb: overlay workspace at $OVERLAY_STATE_DIR" >&2
-        ;;
-      direct)
-        STRATEGY_FLAGS=(
-          --bind "$PROJECT_DIR" /workspace
-        )
-        echo "ocsb: direct mount (read-write, no isolation)" >&2
-        ;;
-      btrfs)
-        # btrfs strategy: create a snapshot of the project directory as workspace
-        BTRFS_SNAP="$WS_DIR/snapshot"
-        if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$BTRFS_SNAP" ]]; then
-          echo "ocsb: reusing btrfs snapshot at $BTRFS_SNAP" >&2
-        else
-          # Check if project dir is on btrfs and we can manage subvolumes
-          if ! _btrfs_probe "$PROJECT_DIR"; then
-            echo "ocsb: btrfs strategy unavailable: $_btrfs_probe_reason" >&2
-            echo "  Hint: ensure project dir is on btrfs and the filesystem is mounted with 'user_subvol_rm_allowed'." >&2
-            exit 1
-          fi
-          # Create a read-write snapshot of the project directory
-          if [[ -d "$BTRFS_SNAP" ]]; then
-            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$BTRFS_SNAP" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$BTRFS_SNAP"
-          fi
-          ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$PROJECT_DIR" "$BTRFS_SNAP"
-          echo "ocsb: created btrfs snapshot at $BTRFS_SNAP" >&2
-        fi
-        STRATEGY_FLAGS=(
-          --bind "$BTRFS_SNAP" /workspace
-        )
-        ;;
-      git-worktree)
-        # git-worktree strategy: create a worktree for the workspace
-        GWT_DIR="$WS_DIR/worktree"
-        if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$GWT_DIR" ]]; then
-          echo "ocsb: reusing git worktree at $GWT_DIR" >&2
-        else
-          # Verify we're in a git repo
-          if ! ${pkgs.git}/bin/git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
-            echo "ocsb: git-worktree strategy requires project directory to be a git repository" >&2
-            exit 1
-          fi
-          # Remove existing worktree if present
-          if [[ -d "$GWT_DIR" ]]; then
-            ${pkgs.git}/bin/git -C "$PROJECT_DIR" worktree remove --force "$GWT_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$GWT_DIR"
-          fi
-          # Create a detached worktree from HEAD
-          ${pkgs.git}/bin/git -C "$PROJECT_DIR" worktree add --detach "$GWT_DIR" HEAD
-          echo "ocsb: created git worktree at $GWT_DIR" >&2
-        fi
-        STRATEGY_FLAGS=(
-          --bind "$GWT_DIR" /workspace
-        )
-        ;;
-      *)
-        echo "ocsb: unknown strategy: $WORKSPACE_STRATEGY" >&2
-        exit 1
-        ;;
-    esac
+    build_workspace_strategy_flags
 
     build_git_metadata_flags
 
@@ -920,63 +984,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
 
     append_nix_store_args
 
-    # User-configured read-only mounts (resolved at runtime for ~ expansion)
-    ${mkMountArrayEntries "--ro-bind-try" cfg.mounts.ro}
-
-    # User-configured read-write mounts
-    ${mkMountArrayEntries "--bind-try" cfg.mounts.rw}
-
-    # Workspace strategy mounts (must come before runtime mounts so /workspace exists)
-    BWRAP_ARGS+=("''${STRATEGY_FLAGS[@]}")
-
-    # Runtime CLI mounts (--ro / --rw flags) — after strategy so /workspace is available
-    if [[ ''${#RUNTIME_MOUNTS[@]} -gt 0 ]]; then
-      BWRAP_ARGS+=("''${RUNTIME_MOUNTS[@]}")
-    fi
-
-    # Per-directory overlay mounts (--overlay-mount HOST:SANDBOX)
-    _OVL_IDX=0
-    while [[ $_OVL_IDX -lt ''${#OVERLAY_MOUNTS[@]} ]]; do
-      _OVL_HOST="''${OVERLAY_MOUNTS[$_OVL_IDX]}"
-      _OVL_SANDBOX="''${OVERLAY_MOUNTS[$_OVL_IDX+1]}"
-      _OVL_HASH="$(echo -n "$_OVL_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
-      _OVL_STATE="$OVERLAY_STATE_DIR/ovl-$_OVL_HASH"
-      ${pkgs.coreutils}/bin/mkdir -p "$_OVL_STATE/upper" "$_OVL_STATE/work"
-      BWRAP_ARGS+=(--overlay-src "$_OVL_HOST" --overlay "$_OVL_STATE/upper" "$_OVL_STATE/work" "$_OVL_SANDBOX")
-      echo "ocsb: overlay mount $_OVL_HOST -> $_OVL_SANDBOX (state: $_OVL_STATE)" >&2
-      _OVL_IDX=$((_OVL_IDX + 2))
-    done
-
-    # Per-directory snapshot mounts (--snap-mount HOST:SANDBOX)
-    _SNAP_IDX=0
-    while [[ $_SNAP_IDX -lt ''${#SNAP_MOUNTS[@]} ]]; do
-      _SNAP_HOST="''${SNAP_MOUNTS[$_SNAP_IDX]}"
-      _SNAP_SANDBOX="''${SNAP_MOUNTS[$_SNAP_IDX+1]}"
-      _SNAP_HASH="$(echo -n "$_SNAP_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
-      _SNAP_DIR="$OVERLAY_STATE_DIR/snap-$_SNAP_HASH"
-      if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$_SNAP_DIR" ]]; then
-        echo "ocsb: reusing snapshot $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
-      else
-        # Detect btrfs subvolume by inode (subvol roots have inode 256)
-        _SNAP_INO="$(${pkgs.coreutils}/bin/stat -c %i "$_SNAP_HOST" 2>/dev/null || echo 0)"
-        if [[ "$_SNAP_INO" != "256" ]]; then
-          echo "ocsb: error: --snap-mount source must be a btrfs subvolume root: $_SNAP_HOST" >&2
-          exit 1
-        fi
-        if [[ -d "$_SNAP_DIR" ]]; then
-          ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_SNAP_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_SNAP_DIR"
-        fi
-        ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$_SNAP_HOST" "$_SNAP_DIR"
-        echo "ocsb: snapshot mount $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
-      fi
-      BWRAP_ARGS+=(--bind "$_SNAP_DIR" "$_SNAP_SANDBOX")
-      _SNAP_IDX=$((_SNAP_IDX + 2))
-    done
-
-    # Git metadata mounts (for gitfile-backed repos)
-    if [[ ''${#GIT_METADATA_FLAGS[@]} -gt 0 ]]; then
-      BWRAP_ARGS+=("''${GIT_METADATA_FLAGS[@]}")
-    fi
+    append_workspace_mount_args
 
     # Environment
     append_environment_args
