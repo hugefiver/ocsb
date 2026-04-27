@@ -621,6 +621,102 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       fi
     }
 
+    init_bwrap_args() {
+      BWRAP_ARGS=(
+        --unshare-all
+        ${lib.optionalString (networkMode == "host" || dualLayerEnabled) "--share-net"}
+        --die-with-parent
+        ${lib.optionalString (!cfg.app.preserveCtty) "--new-session"}
+        --clearenv
+
+        ${if networkMode == "filtered" && !dualLayerEnabled && cfg.app.runAsRoot then ''
+        # Filtered mode + runAsRoot: uid 0 for CAP_NET_ADMIN (iptables best-effort).
+        # uid 0 inside a user namespace has NO host privileges.
+        --uid 0
+        --gid 0
+        '' else ''
+        --uid "$(${pkgs.coreutils}/bin/id -u)"
+        --gid "$(${pkgs.coreutils}/bin/id -g)"
+        ''}
+        --dev /dev
+        --proc /proc
+        --tmpfs /tmp
+        --tmpfs /run
+        --dir /var
+        --dir /var/lib
+        --dir /var/lib/postgresql
+
+        ${if networkMode == "filtered" && !dualLayerEnabled then
+          ''--ro-bind "${customResolvConf}" /etc/resolv.conf''
+        else
+          "--ro-bind-try /etc/resolv.conf /etc/resolv.conf"
+        }
+        --ro-bind-try /etc/ssl /etc/ssl
+        --ro-bind-try /etc/static/ssl /etc/static/ssl
+        --ro-bind-try /etc/nix /etc/nix
+        --ro-bind-try /etc/passwd /etc/passwd
+        --ro-bind-try /etc/group /etc/group
+        --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
+
+        --symlink usr/lib /lib
+        --symlink usr/lib64 /lib64
+
+        --tmpfs /home
+        --dir /home/sandbox
+        --dir /home/sandbox/.config
+        --dir /home/sandbox/.local
+
+        --ro-bind "${sandboxBin}/bin" /usr/bin
+        --symlink /usr/bin /bin
+      )
+    }
+
+    exec_sandbox() {
+      ${if networkMode == "filtered" && !dualLayerEnabled then ''
+      _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
+      _SLIRP_PID=""
+
+      _cleanup_net() {
+        [[ -n "$_SLIRP_PID" ]] && kill "$_SLIRP_PID" 2>/dev/null || true
+        ${pkgs.coreutils}/bin/rm -rf "$_NET_TMP"
+      }
+      trap _cleanup_net EXIT
+
+      ${pkgs.coreutils}/bin/mkfifo "$_NET_TMP/info"
+
+      # Reader runs in background: waits for bwrap to write child PID to the
+      # fifo, then launches slirp4netns. bwrap itself runs in the FOREGROUND
+      # via exec so it owns the controlling tty's foreground process group;
+      # otherwise apps that call tcsetattr() (raw-mode TUIs like ironclaw's
+      # dialoguer prompts) get EIO/SIGTTOU and silently fall back to
+      # non-interactive mode, auto-defaulting every prompt.
+      #
+      # Two cleanup-critical details:
+      #   1. `exec 9>&-` releases the workspace flock fd that this subshell
+      #      inherited from the launcher. Otherwise slirp4netns would hold
+      #      the lock open after bwrap dies, blocking subsequent launches
+      #      with "workspace is locked by another process".
+      #   2. `setpriv --pdeathsig=TERM` makes slirp4netns die when its
+      #      parent (bwrap, post-exec) dies. Without it, slirp4netns
+      #      orphans to PID 1 and leaks indefinitely.
+      (
+        _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || exit 1
+        exec 9>&-
+        exec ${pkgs.util-linux}/bin/setpriv --pdeathsig=TERM -- ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0
+      ) &
+      _SLIRP_PID=$!
+
+      exec ${pkgs.bubblewrap}/bin/bwrap \
+        "''${BWRAP_ARGS[@]}" \
+        --info-fd 3 \
+        -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
+        3>"$_NET_TMP/info"
+      '' else ''
+      # Simple exec: host network or no network
+      exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
+      ''}
+    }
+
     # =========================================================
     # Runtime argument parsing
     # =========================================================
@@ -934,53 +1030,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # =========================================================
     # Build bwrap argument array
     # =========================================================
-    BWRAP_ARGS=(
-      --unshare-all
-      ${lib.optionalString (networkMode == "host" || dualLayerEnabled) "--share-net"}
-      --die-with-parent
-      ${lib.optionalString (!cfg.app.preserveCtty) "--new-session"}
-      --clearenv
-
-      ${if networkMode == "filtered" && !dualLayerEnabled && cfg.app.runAsRoot then ''
-      # Filtered mode + runAsRoot: uid 0 for CAP_NET_ADMIN (iptables best-effort).
-      # uid 0 inside a user namespace has NO host privileges.
-      --uid 0
-      --gid 0
-      '' else ''
-      --uid "$(${pkgs.coreutils}/bin/id -u)"
-      --gid "$(${pkgs.coreutils}/bin/id -g)"
-      ''}
-      --dev /dev
-      --proc /proc
-      --tmpfs /tmp
-      --tmpfs /run
-      --dir /var
-      --dir /var/lib
-      --dir /var/lib/postgresql
-
-      ${if networkMode == "filtered" && !dualLayerEnabled then
-        ''--ro-bind "${customResolvConf}" /etc/resolv.conf''
-      else
-        "--ro-bind-try /etc/resolv.conf /etc/resolv.conf"
-      }
-      --ro-bind-try /etc/ssl /etc/ssl
-      --ro-bind-try /etc/static/ssl /etc/static/ssl
-      --ro-bind-try /etc/nix /etc/nix
-      --ro-bind-try /etc/passwd /etc/passwd
-      --ro-bind-try /etc/group /etc/group
-      --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
-
-      --symlink usr/lib /lib
-      --symlink usr/lib64 /lib64
-
-      --tmpfs /home
-      --dir /home/sandbox
-      --dir /home/sandbox/.config
-      --dir /home/sandbox/.local
-
-      --ro-bind "${sandboxBin}/bin" /usr/bin
-      --symlink /usr/bin /bin
-    )
+    init_bwrap_args
 
     append_nix_store_args
 
@@ -1002,49 +1052,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # =========================================================
     # Exec bwrap
     # =========================================================
-    ${if networkMode == "filtered" && !dualLayerEnabled then ''
-    _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
-    _SLIRP_PID=""
-
-    _cleanup_net() {
-      [[ -n "$_SLIRP_PID" ]] && kill "$_SLIRP_PID" 2>/dev/null || true
-      ${pkgs.coreutils}/bin/rm -rf "$_NET_TMP"
-    }
-    trap _cleanup_net EXIT
-
-    ${pkgs.coreutils}/bin/mkfifo "$_NET_TMP/info"
-
-    # Reader runs in background: waits for bwrap to write child PID to the
-    # fifo, then launches slirp4netns. bwrap itself runs in the FOREGROUND
-    # via exec so it owns the controlling tty's foreground process group;
-    # otherwise apps that call tcsetattr() (raw-mode TUIs like ironclaw's
-    # dialoguer prompts) get EIO/SIGTTOU and silently fall back to
-    # non-interactive mode, auto-defaulting every prompt.
-    #
-    # Two cleanup-critical details:
-    #   1. `exec 9>&-` releases the workspace flock fd that this subshell
-    #      inherited from the launcher. Otherwise slirp4netns would hold
-    #      the lock open after bwrap dies, blocking subsequent launches
-    #      with "workspace is locked by another process".
-    #   2. `setpriv --pdeathsig=TERM` makes slirp4netns die when its
-    #      parent (bwrap, post-exec) dies. Without it, slirp4netns
-    #      orphans to PID 1 and leaks indefinitely.
-    (
-      _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || exit 1
-      exec 9>&-
-      exec ${pkgs.util-linux}/bin/setpriv --pdeathsig=TERM -- ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0
-    ) &
-    _SLIRP_PID=$!
-
-    exec ${pkgs.bubblewrap}/bin/bwrap \
-      "''${BWRAP_ARGS[@]}" \
-      --info-fd 3 \
-      -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
-      3>"$_NET_TMP/info"
-    '' else ''
-    # Simple exec: host network or no network
-    exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
-    ''}
+    exec_sandbox
   '';
 
 in
