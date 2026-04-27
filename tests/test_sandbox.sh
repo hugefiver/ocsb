@@ -91,6 +91,8 @@ echo ""
 echo "--- identity ---"
 assert_not "not running as root (uid)" [ "$(id -u)" = "0" ]
 assert_not "not running as root (gid)" [ "$(id -g)" = "0" ]
+assert "uid matches host user" [ "$(id -u)" = "${OCSB_HOST_UID:-$(id -u)}" ]
+assert "gid matches host group" [ "$(id -g)" = "${OCSB_HOST_GID:-$(id -g)}" ]
 echo "  uid=$(id -u) gid=$(id -g)"
 echo ""
 

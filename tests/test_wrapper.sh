@@ -135,6 +135,7 @@ PROJ_HASH_STRAT="$(echo -n "$PROJECT_DIR" | sha256sum | cut -c1-16)"
 STRAT_MARKER="$(cat "$HOME/.cache/ocsb/$PROJ_HASH_STRAT/strat-test/.strategy" 2>/dev/null || echo MISSING)"
 assert "strategy marker updated after overwrite" [ "$STRAT_MARKER" = "overlayfs" ]
 
+chmod -R u+w "$HOME/.cache/ocsb/$PROJ_HASH_STRAT/strat-test" 2>/dev/null || true
 rm -rf "$PROJECT_DIR/.ocsb/strat-test"
 rm -rf "$HOME/.cache/ocsb/$PROJ_HASH_STRAT/strat-test"
 echo ""
@@ -152,6 +153,16 @@ assert "overlay upper dir exists" [ -d "$EXPECTED_STATE/upper" ]
 assert "overlay work dir exists" [ -d "$EXPECTED_STATE/work" ]
 assert_not "no upper inside .ocsb" [ -d "$PROJECT_DIR/.ocsb/test-overlay-loc/upper" ]
 
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+"$OCSB_BIN" -w "test-overlay-loc" --strategy overlayfs --continue -- \
+  -c 'echo uid-test > /workspace/.ocsb_uid_test'
+UID_TEST_FILE="$(find "$EXPECTED_STATE/upper" -name .ocsb_uid_test -type f -print -quit)"
+assert "overlay write lands in upper" [ -n "$UID_TEST_FILE" ]
+assert "overlay upper file owned by host uid" [ "$(stat -c %u "$UID_TEST_FILE")" = "$HOST_UID" ]
+assert "overlay upper file owned by host gid" [ "$(stat -c %g "$UID_TEST_FILE")" = "$HOST_GID" ]
+
+chmod -R u+w "$EXPECTED_STATE" 2>/dev/null || true
 rm -rf "$EXPECTED_STATE"
 rm -rf "$PROJECT_DIR/.ocsb/test-overlay-loc"
 echo ""
