@@ -2,7 +2,7 @@
 
 基于 [bubblewrap](https://github.com/containers/bubblewrap) 的 Nix 沙箱框架。原生支持 [OpenCode](https://github.com/opencode-ai/opencode) 与 [Ironclaw](https://github.com/nearai/ironclaw)，也可用同样的模型沙箱化任意可执行文件。
 
-特性：closure-only `/nix/store`、可切换的网络隔离（host / 过滤 / 无网）、CoW workspace（overlayfs/btrfs/git-worktree/direct）、非 root 身份、capability 全 drop、声明式 Nix 模块。
+特性：可写 chroot `/nix/store`、可选宿主 nix-daemon、closure-only `/nix/store`、可切换的网络隔离（host / 过滤 / 无网）、CoW workspace（overlayfs/btrfs/git-worktree/direct）、非 root 身份、capability 全 drop、声明式 Nix 模块。
 
 ## 系统要求
 
@@ -57,7 +57,7 @@
 | 值 | 说明 |
 |---|---|
 | `auto`（默认） | 探测：能用 btrfs 就 btrfs，否则 overlayfs |
-| `overlayfs` | overlay，upper 在 `~/.cache/ocsb/<hash>/<name>/upper` |
+| `overlayfs` | 用户 workspace overlay，upper 在 `~/.cache/ocsb/<hash>/<name>/upper`；适合用户拥有的项目文件 |
 | `btrfs` | btrfs subvol snapshot；需 `user_subvol_rm_allowed` |
 | `git-worktree` | detached worktree；需 git 仓库 |
 | `direct` | 直接 bind 项目目录（无隔离） |
@@ -113,7 +113,7 @@
 
 覆盖：`OCSB_IRONCLAW_PERSIST_DIR=/path` 或 `--persist-dir /path`。
 
-**沙箱内 nix**：默认 `nixStoreMode = "chroot"` —— 首次启动 `nix copy` 把闭包搬到 `$workspace/chroot/nix/store`，bind-mount 进沙箱，可在沙箱内 `nix profile add nixpkgs#foo`（cache.nixos.org 可用）。可改 `experimental.nixStoreMode = "overlay"`（overlayfs，旧实现，部分内核 copy-up 失败）或 `"closure"`（只挂闭包 RO，最小面）。
+**沙箱内 nix**：默认 `nixStoreMode = "chroot"` —— 首次启动 `nix copy` 把闭包搬到 `$workspace/chroot/nix/store`，bind-mount 进沙箱，可在沙箱内 `nix profile add nixpkgs#foo`（cache.nixos.org 可用）。可改 `experimental.nixStoreMode = "host-daemon"`（只读绑定宿主 `/nix/store`，写入走宿主 nix-daemon socket，需要宿主 daemon 权限策略收紧）或 `"closure"`（只挂闭包 RO，最小面）。`/nix/store` 不再使用 overlayfs：宿主 store 是 root-owned lower，unprivileged user namespace 下 copy-up 会遇到 ownership/permission 问题；workspace 的 `overlayfs` 策略不受影响。
 
 **升级到新 release**（保留最近 3 个版本）：
 1. 在 `flake.nix` 把当前 `ironclaw-src` 改名为 `ironclaw-src-v0_XX_X`
