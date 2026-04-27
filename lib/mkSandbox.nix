@@ -238,6 +238,7 @@ let
   launcher = pkgs.writeShellScript "${cfg.app.name}-launcher" ''
     set -euo pipefail
 
+    maybe_attach() {
     # =========================================================
     # --attach: enter namespaces of the currently-running sandbox
     # of this same app. Detected anywhere in args; bypasses every
@@ -298,6 +299,9 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         -m -p -i -u -n \
         -- ${pkgs.bashInteractive}/bin/bash -c "$_INNER_SCRIPT"
     fi
+    }
+
+    maybe_attach "$@"
 
     # Record this launcher pid so future --attach can find us.
     # After `exec bwrap` further down the script, this pid IS the
@@ -331,6 +335,159 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         p="/home/sandbox"
       fi
       echo "$p"
+    }
+
+    build_git_metadata_flags() {
+      # =========================================================
+      # Git metadata: safe discovery via git rev-parse
+      # =========================================================
+      # Use git rev-parse instead of manual .git file parsing to avoid
+      # mounting arbitrary host paths from crafted .git files.
+      # Unset GIT_* env vars to prevent host environment contamination.
+      GIT_METADATA_FLAGS=()
+
+      case "$WORKSPACE_STRATEGY" in
+        overlayfs|direct) _GIT_CHECK_SRC="$PROJECT_DIR" ;;
+        btrfs) _GIT_CHECK_SRC="''${BTRFS_SNAP:-}" ;;
+        git-worktree) _GIT_CHECK_SRC="''${GWT_DIR:-}" ;;
+        *) _GIT_CHECK_SRC="" ;;
+      esac
+
+      if [[ -n "$_GIT_CHECK_SRC" ]]; then
+        _GITDIR_PATH="$(${pkgs.coreutils}/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+          ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --absolute-git-dir 2>/dev/null)" || _GITDIR_PATH=""
+
+        if [[ -n "$_GITDIR_PATH" ]] && [[ -d "$_GITDIR_PATH" ]]; then
+          # Security: constrain git metadata to project root boundary
+          _GITDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH")"
+          if [[ "$_GITDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_GITDIR_REAL" != "$PROJECT_DIR" ]]; then
+            echo "ocsb: warning: git metadata path escapes project root, skipping: $_GITDIR_PATH" >&2
+          else
+            _GIT_BIND="--ro-bind"
+            [[ "$WORKSPACE_STRATEGY" == "git-worktree" ]] && _GIT_BIND="--bind"
+
+            # Use canonical path as bind source to prevent TOCTOU symlink-swap attacks
+            GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_GITDIR_REAL" "$_GITDIR_REAL")
+
+            # Mount common dir if different from git dir (linked worktrees)
+            _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+              ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --git-common-dir 2>/dev/null)" || _COMMONDIR_PATH=""
+            if [[ -n "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != /* ]]; then
+              _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH/$_COMMONDIR_PATH")"
+            fi
+            if [[ -n "$_COMMONDIR_PATH" ]] && [[ -d "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != "$_GITDIR_PATH" ]]; then
+              _COMMONDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_COMMONDIR_PATH")"
+              if [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR" ]]; then
+                echo "ocsb: warning: git common-dir escapes project root, skipping: $_COMMONDIR_PATH" >&2
+              else
+                # Use canonical path as bind source to prevent TOCTOU symlink-swap attacks
+                GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_COMMONDIR_REAL" "$_COMMONDIR_REAL")
+              fi
+            fi
+          fi
+        fi
+      fi
+    }
+
+    append_nix_store_args() {
+      # /nix/store layout — see modules/experimental.nix nixStoreMode for tradeoffs.
+      ${if cfg.experimental.nixStoreMode == "chroot" then ''
+      # Chroot store: relocated, writable nix store populated by `nix copy`.
+      # Sandbox sees a real /nix/store with cache-compatible prefix; can
+      # `nix profile add nixpkgs#foo` and persist pkgs per-workspace.
+      _CHROOT_ROOT="$OVERLAY_STATE_DIR/chroot"
+      _CHROOT_MARKER="$OVERLAY_STATE_DIR/.chroot-source"
+      _CHROOT_SRC="${closureInfoDrv}"
+      ${pkgs.coreutils}/bin/mkdir -p "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix"
+      if [[ ! -f "$_CHROOT_MARKER" ]] || [[ "$(${pkgs.coreutils}/bin/cat "$_CHROOT_MARKER" 2>/dev/null)" != "$_CHROOT_SRC" ]]; then
+        echo "ocsb: populating chroot nix store at $_CHROOT_ROOT (first run / closure changed; may take a while)..." >&2
+        mapfile -t _CHROOT_PATHS < "$_CHROOT_SRC/store-paths"
+        if ! ${pkgs.nix}/bin/nix --extra-experimental-features "nix-command" copy \
+            --no-check-sigs --offline \
+            --to "local?root=$_CHROOT_ROOT" \
+            "''${_CHROOT_PATHS[@]}" >&2; then
+          echo "ocsb: error: nix copy into chroot store failed" >&2
+          exit 1
+        fi
+        echo "$_CHROOT_SRC" > "$_CHROOT_MARKER"
+        echo "ocsb: chroot nix store ready" >&2
+      fi
+      BWRAP_ARGS+=(
+        --bind "$_CHROOT_ROOT/nix/store" /nix/store
+        --bind "$_CHROOT_ROOT/nix/var/nix" /nix/var/nix
+      )
+      '' else if cfg.experimental.nixStoreMode == "host-daemon" then ''
+      # Host daemon store: expose host /nix/store read-only and delegate all
+      # mutations to the host nix-daemon socket. This is intentionally opt-in:
+      # it has the best performance but the weakest store isolation.
+      if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+        echo "ocsb: error: nixStoreMode=host-daemon requires /nix/var/nix/daemon-socket/socket" >&2
+        exit 1
+      fi
+      BWRAP_ARGS+=(
+        --ro-bind /nix/store /nix/store
+        --ro-bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket
+      )
+      echo "ocsb: host nix-daemon mode enabled (/nix/store read-only, writes via daemon)" >&2
+      '' else ''
+      # Closure-only /nix/store mounts: mount each store path individually,
+      # read-only. Smallest attack surface; cannot install pkgs in-sandbox.
+      while IFS= read -r storePath; do
+        BWRAP_ARGS+=(--ro-bind "$storePath" "$storePath")
+      done < ${closureInfoDrv}/store-paths
+      ''}
+    }
+
+    append_environment_args() {
+      BWRAP_ARGS+=(
+        --setenv HOME /home/sandbox
+        --setenv PATH ${sandboxPath}
+        --setenv TERM "''${TERM:-xterm-256color}"
+        --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+        --setenv SANDBOX 1
+        --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
+        --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
+        --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
+        --setenv OCSB_HOST_UID "$(${pkgs.coreutils}/bin/id -u)"
+        --setenv OCSB_HOST_GID "$(${pkgs.coreutils}/bin/id -g)"
+        ${lib.optionalString dualLayerEnabled ''--setenv SHELL "${sandboxShell}"''}
+        ${lib.optionalString dualLayerEnabled ''--setenv OCSB_DUAL_LAYER outer''}
+      )
+      ${envSetenvEntries}
+      ${lib.optionalString (cfg.experimental.nixStoreMode == "host-daemon") ''
+      # Force clients to use the host daemon even if a template/user env tried
+      # to select local/single-user Nix state.
+      BWRAP_ARGS+=(
+        --setenv NIX_REMOTE daemon
+        --setenv NIX_CONF_DIR /etc/nix
+        --setenv NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      )
+      ''}
+    }
+
+    build_sandbox_cmd() {
+      SANDBOX_CMD=()
+      if [[ -n "''${OCSB_EXEC_OVERRIDE:-}" && $# -gt 0 ]]; then
+        SANDBOX_CMD=("$@")
+      else
+      ${if cfg.app.package != null then ''
+      SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
+      '' else ''
+      if [[ $# -gt 0 ]]; then
+        if [[ "$1" == -* ]]; then
+          SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
+        else
+          SANDBOX_CMD=("$@")
+        fi
+      else
+        SANDBOX_CMD=(${lib.escapeShellArg appExec})
+      fi
+      ''}
+      fi
+
+      ${lib.optionalString (preExecScript != null) ''
+      SANDBOX_CMD=(${preExecScript} "''${SANDBOX_CMD[@]}")
+      ''}
     }
 
     # =========================================================
@@ -708,55 +865,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         ;;
     esac
 
-    # =========================================================
-    # Git metadata: safe discovery via git rev-parse
-    # =========================================================
-    # Use git rev-parse instead of manual .git file parsing to avoid
-    # mounting arbitrary host paths from crafted .git files.
-    # Unset GIT_* env vars to prevent host environment contamination.
-    GIT_METADATA_FLAGS=()
-
-    case "$WORKSPACE_STRATEGY" in
-      overlayfs|direct) _GIT_CHECK_SRC="$PROJECT_DIR" ;;
-      btrfs) _GIT_CHECK_SRC="''${BTRFS_SNAP:-}" ;;
-      git-worktree) _GIT_CHECK_SRC="''${GWT_DIR:-}" ;;
-      *) _GIT_CHECK_SRC="" ;;
-    esac
-
-    if [[ -n "$_GIT_CHECK_SRC" ]]; then
-      _GITDIR_PATH="$(${pkgs.coreutils}/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-        ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --absolute-git-dir 2>/dev/null)" || _GITDIR_PATH=""
-
-      if [[ -n "$_GITDIR_PATH" ]] && [[ -d "$_GITDIR_PATH" ]]; then
-        # Security: constrain git metadata to project root boundary
-        _GITDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH")"
-        if [[ "$_GITDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_GITDIR_REAL" != "$PROJECT_DIR" ]]; then
-          echo "ocsb: warning: git metadata path escapes project root, skipping: $_GITDIR_PATH" >&2
-        else
-          _GIT_BIND="--ro-bind"
-          [[ "$WORKSPACE_STRATEGY" == "git-worktree" ]] && _GIT_BIND="--bind"
-
-          # Use canonical path as bind source to prevent TOCTOU symlink-swap attacks
-          GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_GITDIR_REAL" "$_GITDIR_REAL")
-
-          # Mount common dir if different from git dir (linked worktrees)
-          _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
-            ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --git-common-dir 2>/dev/null)" || _COMMONDIR_PATH=""
-          if [[ -n "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != /* ]]; then
-            _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH/$_COMMONDIR_PATH")"
-          fi
-          if [[ -n "$_COMMONDIR_PATH" ]] && [[ -d "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != "$_GITDIR_PATH" ]]; then
-            _COMMONDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_COMMONDIR_PATH")"
-            if [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR" ]]; then
-              echo "ocsb: warning: git common-dir escapes project root, skipping: $_COMMONDIR_PATH" >&2
-            else
-              # Use canonical path as bind source to prevent TOCTOU symlink-swap attacks
-              GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_COMMONDIR_REAL" "$_COMMONDIR_REAL")
-            fi
-          fi
-        fi
-      fi
-    fi
+    build_git_metadata_flags
 
     # =========================================================
     # Build bwrap argument array
@@ -809,52 +918,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       --symlink /usr/bin /bin
     )
 
-    # /nix/store layout — see modules/experimental.nix nixStoreMode for tradeoffs.
-    ${if cfg.experimental.nixStoreMode == "chroot" then ''
-      # Chroot store: relocated, writable nix store populated by `nix copy`.
-      # Sandbox sees a real /nix/store with cache-compatible prefix; can
-      # `nix profile add nixpkgs#foo` and persist pkgs per-workspace.
-      _CHROOT_ROOT="$OVERLAY_STATE_DIR/chroot"
-      _CHROOT_MARKER="$OVERLAY_STATE_DIR/.chroot-source"
-      _CHROOT_SRC="${closureInfoDrv}"
-      ${pkgs.coreutils}/bin/mkdir -p "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix"
-      if [[ ! -f "$_CHROOT_MARKER" ]] || [[ "$(${pkgs.coreutils}/bin/cat "$_CHROOT_MARKER" 2>/dev/null)" != "$_CHROOT_SRC" ]]; then
-        echo "ocsb: populating chroot nix store at $_CHROOT_ROOT (first run / closure changed; may take a while)..." >&2
-        mapfile -t _CHROOT_PATHS < "$_CHROOT_SRC/store-paths"
-        if ! ${pkgs.nix}/bin/nix --extra-experimental-features "nix-command" copy \
-            --no-check-sigs --offline \
-            --to "local?root=$_CHROOT_ROOT" \
-            "''${_CHROOT_PATHS[@]}" >&2; then
-          echo "ocsb: error: nix copy into chroot store failed" >&2
-          exit 1
-        fi
-        echo "$_CHROOT_SRC" > "$_CHROOT_MARKER"
-        echo "ocsb: chroot nix store ready" >&2
-      fi
-      BWRAP_ARGS+=(
-        --bind "$_CHROOT_ROOT/nix/store" /nix/store
-        --bind "$_CHROOT_ROOT/nix/var/nix" /nix/var/nix
-      )
-    '' else if cfg.experimental.nixStoreMode == "host-daemon" then ''
-      # Host daemon store: expose host /nix/store read-only and delegate all
-      # mutations to the host nix-daemon socket. This is intentionally opt-in:
-      # it has the best performance but the weakest store isolation.
-      if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
-        echo "ocsb: error: nixStoreMode=host-daemon requires /nix/var/nix/daemon-socket/socket" >&2
-        exit 1
-      fi
-      BWRAP_ARGS+=(
-        --ro-bind /nix/store /nix/store
-        --ro-bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket
-      )
-      echo "ocsb: host nix-daemon mode enabled (/nix/store read-only, writes via daemon)" >&2
-    '' else ''
-      # Closure-only /nix/store mounts: mount each store path individually,
-      # read-only. Smallest attack surface; cannot install pkgs in-sandbox.
-      while IFS= read -r storePath; do
-        BWRAP_ARGS+=(--ro-bind "$storePath" "$storePath")
-      done < ${closureInfoDrv}/store-paths
-    ''}
+    append_nix_store_args
 
     # User-configured read-only mounts (resolved at runtime for ~ expansion)
     ${mkMountArrayEntries "--ro-bind-try" cfg.mounts.ro}
@@ -915,30 +979,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     fi
 
     # Environment
-    BWRAP_ARGS+=(
-      --setenv HOME /home/sandbox
-      --setenv PATH ${sandboxPath}
-      --setenv TERM "''${TERM:-xterm-256color}"
-      --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-      --setenv SANDBOX 1
-      --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
-      --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
-      --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
-      --setenv OCSB_HOST_UID "$(${pkgs.coreutils}/bin/id -u)"
-      --setenv OCSB_HOST_GID "$(${pkgs.coreutils}/bin/id -g)"
-      ${lib.optionalString dualLayerEnabled ''--setenv SHELL "${sandboxShell}"''}
-      ${lib.optionalString dualLayerEnabled ''--setenv OCSB_DUAL_LAYER outer''}
-    )
-    ${envSetenvEntries}
-    ${lib.optionalString (cfg.experimental.nixStoreMode == "host-daemon") ''
-    # Force clients to use the host daemon even if a template/user env tried
-    # to select local/single-user Nix state.
-    BWRAP_ARGS+=(
-      --setenv NIX_REMOTE daemon
-      --setenv NIX_CONF_DIR /etc/nix
-      --setenv NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-    )
-    ''}
+    append_environment_args
 
     # Working directory and command
     BWRAP_ARGS+=(
@@ -948,28 +989,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # =========================================================
     # Determine sandbox command
     # =========================================================
-    SANDBOX_CMD=()
-    if [[ -n "''${OCSB_EXEC_OVERRIDE:-}" && $# -gt 0 ]]; then
-      SANDBOX_CMD=("$@")
-    else
-    ${if cfg.app.package != null then ''
-    SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
-    '' else ''
-    if [[ $# -gt 0 ]]; then
-      if [[ "$1" == -* ]]; then
-        SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
-      else
-        SANDBOX_CMD=("$@")
-      fi
-    else
-      SANDBOX_CMD=(${lib.escapeShellArg appExec})
-    fi
-    ''}
-    fi
-
-    ${lib.optionalString (preExecScript != null) ''
-    SANDBOX_CMD=(${preExecScript} "''${SANDBOX_CMD[@]}")
-    ''}
+    build_sandbox_cmd "$@"
 
     # =========================================================
     # Exec bwrap
