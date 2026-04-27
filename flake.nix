@@ -278,6 +278,16 @@
             mounts.ro = [];
             mounts.rw = [];
           });
+
+          host-daemon-test = mkSandbox ({ pkgs, ... }: {
+            app.name = "ocsb-host-daemon-test";
+            packages = with pkgs; [ coreutils nix ];
+            workspace = { strategy = "direct"; baseDir = ".ocsb"; name = "_"; };
+            experimental.nixStoreMode = "host-daemon";
+            env = {};
+            mounts.ro = [];
+            mounts.rw = [];
+          });
         }
       );
 

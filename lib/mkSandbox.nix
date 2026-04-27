@@ -495,6 +495,12 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         _btrfs_probe_reason="not a btrfs filesystem (fstype=$_fstype)"
         return 1
       fi
+      local _dir_ino
+      _dir_ino="$(${pkgs.coreutils}/bin/stat -c %i "$_dir" 2>/dev/null || echo 0)"
+      if [[ "$_dir_ino" != "256" ]]; then
+        _btrfs_probe_reason="$_dir is not a btrfs subvolume root"
+        return 1
+      fi
       local _probe="$_dir/.ocsb-btrfs-probe.$$"
       if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume create "$_probe" &>/dev/null; then
         _btrfs_probe_reason="cannot create subvolume in $_dir (permission denied)"
@@ -595,6 +601,10 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             ;;
         esac
         ${pkgs.coreutils}/bin/rm -rf "$WS_DIR"
+        if [[ -d "$OVERLAY_STATE_DIR/chroot" ]]; then
+          ${pkgs.coreutils}/bin/chmod -R u+w "$OVERLAY_STATE_DIR/chroot" 2>/dev/null || true
+        fi
+        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/chroot" "$OVERLAY_STATE_DIR/.chroot-source"
         ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
         # Clean per-directory overlay and snapshot state
         for _d in "$OVERLAY_STATE_DIR"/ovl-*; do
@@ -825,16 +835,19 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         --bind "$_CHROOT_ROOT/nix/store" /nix/store
         --bind "$_CHROOT_ROOT/nix/var/nix" /nix/var/nix
       )
-    '' else if cfg.experimental.nixStoreMode == "overlay" then ''
-      # Writable overlay: lower = host /nix/store, upper = per-workspace.
-      # Note: copy-up of root-owned host files fails under user-NS on most
-      # kernels (EPERM). Use chroot mode for full read-write semantics.
-      ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/nix-store-upper" "$OVERLAY_STATE_DIR/nix-store-work"
+    '' else if cfg.experimental.nixStoreMode == "host-daemon" then ''
+      # Host daemon store: expose host /nix/store read-only and delegate all
+      # mutations to the host nix-daemon socket. This is intentionally opt-in:
+      # it has the best performance but the weakest store isolation.
+      if [[ ! -S /nix/var/nix/daemon-socket/socket ]]; then
+        echo "ocsb: error: nixStoreMode=host-daemon requires /nix/var/nix/daemon-socket/socket" >&2
+        exit 1
+      fi
       BWRAP_ARGS+=(
-        --overlay-src /nix/store
-        --overlay "$OVERLAY_STATE_DIR/nix-store-upper" "$OVERLAY_STATE_DIR/nix-store-work" /nix/store
+        --ro-bind /nix/store /nix/store
+        --ro-bind /nix/var/nix/daemon-socket /nix/var/nix/daemon-socket
       )
-      echo "ocsb: /nix/store overlay enabled (upper: $OVERLAY_STATE_DIR/nix-store-upper)" >&2
+      echo "ocsb: host nix-daemon mode enabled (/nix/store read-only, writes via daemon)" >&2
     '' else ''
       # Closure-only /nix/store mounts: mount each store path individually,
       # read-only. Smallest attack surface; cannot install pkgs in-sandbox.
@@ -917,6 +930,15 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       ${lib.optionalString dualLayerEnabled ''--setenv OCSB_DUAL_LAYER outer''}
     )
     ${envSetenvEntries}
+    ${lib.optionalString (cfg.experimental.nixStoreMode == "host-daemon") ''
+    # Force clients to use the host daemon even if a template/user env tried
+    # to select local/single-user Nix state.
+    BWRAP_ARGS+=(
+      --setenv NIX_REMOTE daemon
+      --setenv NIX_CONF_DIR /etc/nix
+      --setenv NIX_SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+    )
+    ''}
 
     # Working directory and command
     BWRAP_ARGS+=(

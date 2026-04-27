@@ -8,7 +8,7 @@ in
 {
   # nixStoreMode defaults to "chroot" — sandbox gets a real, writable
   # /nix/store populated via `nix copy` on first launch. Override to
-  # "overlay" or "closure" via experimental.nixStoreMode if desired.
+  # "host-daemon" or "closure" via experimental.nixStoreMode if desired.
 
   app = {
     name = "ironclaw";

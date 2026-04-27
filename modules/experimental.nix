@@ -31,7 +31,7 @@
     };
 
     nixStoreMode = lib.mkOption {
-      type = lib.types.enum [ "chroot" "overlay" "closure" ];
+      type = lib.types.enum [ "chroot" "host-daemon" "closure" ];
       default = "chroot";
       description = ''
         How /nix/store is exposed inside the sandbox.
@@ -56,21 +56,20 @@
             the chroot directory (one-time per workspace, can be slow and
             consumes disk).
 
-        "overlay":
-          Mount /nix/store as an overlayfs with the host /nix/store as the
-          read-only lower layer and a per-workspace upper layer at
-          $OVERLAY_STATE_DIR/nix-store-upper.
+        "host-daemon":
+          Bind-mount the host /nix/store read-only and the host
+          /nix/var/nix/daemon-socket/socket into the sandbox, then force Nix
+          clients to use the daemon via NIX_REMOTE=daemon.
 
           Pros:
           - No initial copy cost; host store paths are visible immediately.
+          - Installing packages can reuse the host daemon and binary cache.
 
           Cons:
-          - Copy-up of host root-owned files fails under unprivileged
-            user namespaces on most kernels (EPERM on chmod), so anything
-            that triggers copy-up of pre-existing /nix/store entries
-            (including some `nix build` operations) will fail.
-          - The entire host /nix/store is visible (read-only) inside the
-            sandbox, not just the package's transitive closure.
+          - Least isolated store mode: the entire host /nix/store is visible.
+          - Mutations are delegated to the host nix-daemon, so daemon-side
+            allowed-users / trusted-users / substituter policy must be tight.
+          - Requires a multi-user Nix installation with the daemon socket.
 
         "closure":
           Mount only the transitive closure of the configured packages as
@@ -82,6 +81,10 @@
 
           Cons:
           - Cannot install additional packages from inside the sandbox.
+
+        Note: this option only controls /nix/store. Workspace overlayfs is
+        configured separately via workspace.strategy = "overlayfs" and remains
+        supported for user-owned project files.
       '';
     };
   };
