@@ -75,6 +75,14 @@ let
     then "${cfg.app.package}/${cfg.app.binPath}"
     else "${sandboxBin}/bin/bash";
 
+  # PATH inside sandbox: include app's bin dir if a package is configured,
+  # so the app's command is callable by bare name (e.g. `ironclaw` works
+  # in --shell / --attach sessions without typing the full store path).
+  sandboxPath =
+    if cfg.app.package != null
+    then "${cfg.app.package}/bin:/usr/bin"
+    else "/usr/bin";
+
   preExecScript =
     if cfg.app.preExecHook != ""
     then pkgs.writeShellScript "${cfg.app.name}-pre-exec" ''
@@ -201,7 +209,7 @@ let
       --ro-bind-try /etc/group /etc/group
       --clearenv
       --setenv HOME /home/sandbox
-      --setenv PATH /usr/bin
+  --setenv PATH ${sandboxPath}
       --setenv TERM "''${TERM:-xterm-256color}"
       --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       --setenv SANDBOX 1
@@ -229,6 +237,75 @@ let
   # --- Launcher script ---
   launcher = pkgs.writeShellScript "${cfg.app.name}-launcher" ''
     set -euo pipefail
+
+    # =========================================================
+    # --attach: enter namespaces of the currently-running sandbox
+    # of this same app. Detected anywhere in args; bypasses every
+    # other launcher behavior (no preExecHook, no service start,
+    # no fresh bwrap). Use this when you need a shell inside the
+    # SAME instance (e.g. to query a postgres that's already up).
+    # =========================================================
+    _ATTACH_TARGET=""
+    for _arg in "$@"; do
+      case "$_arg" in
+        --attach) _ATTACH_TARGET="auto"; break ;;
+        --attach=*) _ATTACH_TARGET="''${_arg#--attach=}"; break ;;
+      esac
+    done
+
+    if [[ -n "$_ATTACH_TARGET" ]]; then
+      _PIDFILE="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/${cfg.app.name}.pid"
+      _BWRAP_PID=""
+      if [[ "$_ATTACH_TARGET" == "auto" ]]; then
+        if [[ ! -e "$_PIDFILE" ]]; then
+          echo "ocsb: no running ${cfg.app.name} instance (pidfile $_PIDFILE missing)" >&2
+          echo "ocsb: launch the sandbox first, or pass --attach=<bwrap-pid>" >&2
+          exit 1
+        fi
+        _BWRAP_PID=$(${pkgs.coreutils}/bin/cat "$_PIDFILE")
+      else
+        _BWRAP_PID="$_ATTACH_TARGET"
+      fi
+      if ! kill -0 "$_BWRAP_PID" 2>/dev/null; then
+        echo "ocsb: no live process at PID $_BWRAP_PID (stale pidfile?)" >&2
+        [[ -e "$_PIDFILE" ]] && ${pkgs.coreutils}/bin/rm -f "$_PIDFILE"
+        exit 1
+      fi
+      # bwrap forks the sandbox-init child (also named "bwrap"), which
+      # holds the user/mount/pid/etc namespaces we want to enter.
+      # In filtered-network mode, slirp4netns is ALSO a child of bwrap
+      # (reparented when launcher exec'd into bwrap), but it lives in
+      # host namespaces — entering its namespaces would EINVAL. Filter
+      # by comm=bwrap to pick the sandbox init reliably.
+      _INIT_PID=$(${pkgs.procps}/bin/pgrep -P "$_BWRAP_PID" -x bwrap | ${pkgs.coreutils}/bin/head -n1 || true)
+      if [[ -z "$_INIT_PID" ]]; then
+        echo "ocsb: bwrap PID $_BWRAP_PID has no sandbox-init child to attach to" >&2
+        exit 1
+      fi
+      # Inner shell: inherit sandbox PID 1's env (preExecHook exports
+      # like SECRETS_MASTER_KEY, DATABASE_URL, PATH, etc.), cd into
+      # workspace, then drop into interactive bash.
+      _INNER_SCRIPT='while IFS= read -r -d "" _line; do
+  _k="''${_line%%=*}"
+  _v="''${_line#*=}"
+  [[ -n "$_k" && "$_k" != "_" ]] && export "$_k=$_v" 2>/dev/null || true
+done < /proc/1/environ
+cd /workspace 2>/dev/null || cd /home/sandbox 2>/dev/null || cd /
+exec ${pkgs.bashInteractive}/bin/bash -i'
+      exec ${pkgs.util-linux}/bin/nsenter \
+        -t "$_INIT_PID" \
+        -U --preserve-credentials \
+        -m -p -i -u -n \
+        -- ${pkgs.bashInteractive}/bin/bash -c "$_INNER_SCRIPT"
+    fi
+
+    # Record this launcher pid so future --attach can find us.
+    # After `exec bwrap` further down the script, this pid IS the
+    # bwrap pid (exec preserves pid). Stale entries are tolerated:
+    # readers validate with `kill -0` and clean them up.
+    _PIDFILE_DIR="''${XDG_RUNTIME_DIR:-/tmp}/ocsb"
+    ${pkgs.coreutils}/bin/mkdir -p "$_PIDFILE_DIR"
+    echo $$ > "$_PIDFILE_DIR/${cfg.app.name}.pid"
 
     # =========================================================
     # Helper: resolve ~ in paths at runtime
@@ -678,11 +755,11 @@ let
       --unshare-all
       ${lib.optionalString (networkMode == "host" || dualLayerEnabled) "--share-net"}
       --die-with-parent
-      --new-session
+      ${lib.optionalString (!cfg.app.preserveCtty) "--new-session"}
       --clearenv
 
-      ${if networkMode == "filtered" && !dualLayerEnabled then ''
-      # Filtered mode: uid 0 for CAP_NET_ADMIN (iptables best-effort).
+      ${if networkMode == "filtered" && !dualLayerEnabled && cfg.app.runAsRoot then ''
+      # Filtered mode + runAsRoot: uid 0 for CAP_NET_ADMIN (iptables best-effort).
       # uid 0 inside a user namespace has NO host privileges.
       --uid 0
       --gid 0
@@ -722,10 +799,49 @@ let
       --symlink /usr/bin /bin
     )
 
-    # Closure-only /nix/store mounts: mount each store path individually
-    while IFS= read -r storePath; do
-      BWRAP_ARGS+=(--ro-bind "$storePath" "$storePath")
-    done < ${closureInfoDrv}/store-paths
+    # /nix/store layout — see modules/experimental.nix nixStoreMode for tradeoffs.
+    ${if cfg.experimental.nixStoreMode == "chroot" then ''
+      # Chroot store: relocated, writable nix store populated by `nix copy`.
+      # Sandbox sees a real /nix/store with cache-compatible prefix; can
+      # `nix profile add nixpkgs#foo` and persist pkgs per-workspace.
+      _CHROOT_ROOT="$OVERLAY_STATE_DIR/chroot"
+      _CHROOT_MARKER="$OVERLAY_STATE_DIR/.chroot-source"
+      _CHROOT_SRC="${closureInfoDrv}"
+      ${pkgs.coreutils}/bin/mkdir -p "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix"
+      if [[ ! -f "$_CHROOT_MARKER" ]] || [[ "$(${pkgs.coreutils}/bin/cat "$_CHROOT_MARKER" 2>/dev/null)" != "$_CHROOT_SRC" ]]; then
+        echo "ocsb: populating chroot nix store at $_CHROOT_ROOT (first run / closure changed; may take a while)..." >&2
+        mapfile -t _CHROOT_PATHS < "$_CHROOT_SRC/store-paths"
+        if ! ${pkgs.nix}/bin/nix --extra-experimental-features "nix-command" copy \
+            --no-check-sigs --offline \
+            --to "local?root=$_CHROOT_ROOT" \
+            "''${_CHROOT_PATHS[@]}" >&2; then
+          echo "ocsb: error: nix copy into chroot store failed" >&2
+          exit 1
+        fi
+        echo "$_CHROOT_SRC" > "$_CHROOT_MARKER"
+        echo "ocsb: chroot nix store ready" >&2
+      fi
+      BWRAP_ARGS+=(
+        --bind "$_CHROOT_ROOT/nix/store" /nix/store
+        --bind "$_CHROOT_ROOT/nix/var/nix" /nix/var/nix
+      )
+    '' else if cfg.experimental.nixStoreMode == "overlay" then ''
+      # Writable overlay: lower = host /nix/store, upper = per-workspace.
+      # Note: copy-up of root-owned host files fails under user-NS on most
+      # kernels (EPERM). Use chroot mode for full read-write semantics.
+      ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/nix-store-upper" "$OVERLAY_STATE_DIR/nix-store-work"
+      BWRAP_ARGS+=(
+        --overlay-src /nix/store
+        --overlay "$OVERLAY_STATE_DIR/nix-store-upper" "$OVERLAY_STATE_DIR/nix-store-work" /nix/store
+      )
+      echo "ocsb: /nix/store overlay enabled (upper: $OVERLAY_STATE_DIR/nix-store-upper)" >&2
+    '' else ''
+      # Closure-only /nix/store mounts: mount each store path individually,
+      # read-only. Smallest attack surface; cannot install pkgs in-sandbox.
+      while IFS= read -r storePath; do
+        BWRAP_ARGS+=(--ro-bind "$storePath" "$storePath")
+      done < ${closureInfoDrv}/store-paths
+    ''}
 
     # User-configured read-only mounts (resolved at runtime for ~ expansion)
     ${mkMountArrayEntries "--ro-bind-try" cfg.mounts.ro}
@@ -787,11 +903,11 @@ let
 
     # Environment
     BWRAP_ARGS+=(
-  --setenv HOME /home/sandbox
-  --setenv PATH /usr/bin
-  --setenv TERM "''${TERM:-xterm-256color}"
-  --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-  --setenv SANDBOX 1
+      --setenv HOME /home/sandbox
+      --setenv PATH ${sandboxPath}
+      --setenv TERM "''${TERM:-xterm-256color}"
+      --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+      --setenv SANDBOX 1
       --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
       --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
       --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
@@ -811,6 +927,9 @@ let
     # Determine sandbox command
     # =========================================================
     SANDBOX_CMD=()
+    if [[ -n "''${OCSB_EXEC_OVERRIDE:-}" && $# -gt 0 ]]; then
+      SANDBOX_CMD=("$@")
+    else
     ${if cfg.app.package != null then ''
     SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
     '' else ''
@@ -824,6 +943,7 @@ let
       SANDBOX_CMD=(${lib.escapeShellArg appExec})
     fi
     ''}
+    fi
 
     ${lib.optionalString (preExecScript != null) ''
     SANDBOX_CMD=(${preExecScript} "''${SANDBOX_CMD[@]}")
@@ -834,11 +954,9 @@ let
     # =========================================================
     ${if networkMode == "filtered" && !dualLayerEnabled then ''
     _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
-    _BWRAP_PID=""
     _SLIRP_PID=""
 
     _cleanup_net() {
-      [[ -n "$_BWRAP_PID" ]] && kill "$_BWRAP_PID" 2>/dev/null || true
       [[ -n "$_SLIRP_PID" ]] && kill "$_SLIRP_PID" 2>/dev/null || true
       ${pkgs.coreutils}/bin/rm -rf "$_NET_TMP"
     }
@@ -846,28 +964,33 @@ let
 
     ${pkgs.coreutils}/bin/mkfifo "$_NET_TMP/info"
 
+    # Reader runs in background: waits for bwrap to write child PID to the
+    # fifo, then launches slirp4netns. bwrap itself runs in the FOREGROUND
+    # via exec so it owns the controlling tty's foreground process group;
+    # otherwise apps that call tcsetattr() (raw-mode TUIs like ironclaw's
+    # dialoguer prompts) get EIO/SIGTTOU and silently fall back to
+    # non-interactive mode, auto-defaulting every prompt.
+    #
+    # Two cleanup-critical details:
+    #   1. `exec 9>&-` releases the workspace flock fd that this subshell
+    #      inherited from the launcher. Otherwise slirp4netns would hold
+    #      the lock open after bwrap dies, blocking subsequent launches
+    #      with "workspace is locked by another process".
+    #   2. `setpriv --pdeathsig=TERM` makes slirp4netns die when its
+    #      parent (bwrap, post-exec) dies. Without it, slirp4netns
+    #      orphans to PID 1 and leaks indefinitely.
     (
-      exec ${pkgs.bubblewrap}/bin/bwrap \
-        "''${BWRAP_ARGS[@]}" \
-        --info-fd 3 \
-        -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
-        3>"$_NET_TMP/info"
+      _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || exit 1
+      exec 9>&-
+      exec ${pkgs.util-linux}/bin/setpriv --pdeathsig=TERM -- ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0
     ) &
-    _BWRAP_PID=$!
-
-    _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || {
-      >&2 echo "ocsb: failed to start sandbox with network filtering"
-      exit 1
-    }
-
-    ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0 &
     _SLIRP_PID=$!
 
-    set +e
-    wait "$_BWRAP_PID"
-    _BWRAP_RC=$?
-    _BWRAP_PID=""
-    exit $_BWRAP_RC
+    exec ${pkgs.bubblewrap}/bin/bwrap \
+      "''${BWRAP_ARGS[@]}" \
+      --info-fd 3 \
+      -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
+      3>"$_NET_TMP/info"
     '' else ''
     # Simple exec: host network or no network
     exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"

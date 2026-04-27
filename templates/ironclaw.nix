@@ -2,11 +2,19 @@
 
 { ... }:
 
+let
+  pgWithExt = pkgs.postgresql_18.withPackages (p: [ p.pgvector ]);
+in
 {
+  # nixStoreMode defaults to "chroot" — sandbox gets a real, writable
+  # /nix/store populated via `nix copy` on first launch. Override to
+  # "overlay" or "closure" via experimental.nixStoreMode if desired.
+
   app = {
     name = "ironclaw";
     package = ironclawPackage;
     binPath = "bin/ironclaw";
+    runAsRoot = false;
     preExecHook = ''
       set -euo pipefail
 
@@ -23,60 +31,46 @@
       accept-flake-config = true
       EOF
 
-      NIX_MODE="''${OCSB_IRONCLAW_NIX_MODE:-single-user}"
-      case "$NIX_MODE" in
-        portable)
-          # TODO: nix-portable is not packaged in nixpkgs. To enable this mode,
-          # add DavHau/nix-portable as a flake input and inject its binary into
-          # PATH here, or fetchurl the static release binary.
-          echo "[ironclaw] portable mode not yet supported (no nix-portable available)" >&2
-          exit 1
-          ;;
-        single-user)
-          export NIX_STORE_DIR="$HOME/.local/nix/store"
-          export NIX_STATE_DIR="$HOME/.local/nix/var"
-          export NIX_LOG_DIR="$HOME/.local/nix/var/log/nix"
-          mkdir -p "$NIX_STORE_DIR" "$NIX_STATE_DIR" "$NIX_LOG_DIR"
-          cat >> "$HOME/.config/nix/nix.conf" <<EOF
-      store = $NIX_STORE_DIR
-      state-dir = $NIX_STATE_DIR
-      EOF
-          ;;
-        isolated-store)
-          # Known limitation: /nix/store overlay for isolated upper layer is not
-          # automatically configured by ocsb yet.
-          :
-          ;;
-        *)
-          echo "Unknown OCSB_IRONCLAW_NIX_MODE: $NIX_MODE" >&2
-          exit 1
-          ;;
-      esac
-
       PGDATA=/var/lib/postgresql/data
       PGRUN=/run/postgresql
       export PGDATA
       mkdir -p "$PGRUN"
       chmod 0700 "$PGDATA" 2>/dev/null || true
 
+      # Use postgresql.withPackages buildEnv: pgvector is installed under
+      # PG's default share/postgresql/extension and lib paths, found via
+      # compile-time prefix. No extension_control_path needed.
+      _PG_BIN="${pgWithExt}/bin"
+
       if [ ! -f "$PGDATA/PG_VERSION" ]; then
         echo "[ironclaw] initializing postgres cluster..."
-        initdb -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)"
+        "$_PG_BIN/initdb" -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)"
       fi
 
-      pg_ctl -D "$PGDATA" -l "$HOME/postgres.log" -w \
+      "$_PG_BIN/pg_ctl" -D "$PGDATA" -l "$HOME/postgres.log" -w \
         -o "-k $PGRUN -h ''' -c listen_addresses='''" \
         start
 
-      trap 'pg_ctl -D "$PGDATA" -m fast stop || true' EXIT
+      trap '"$_PG_BIN/pg_ctl" -D "$PGDATA" -m fast stop || true' EXIT
 
-      if ! psql -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
-        createdb -h "$PGRUN" ironclaw
+      if ! "$_PG_BIN/psql" -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
+        "$_PG_BIN/createdb" -h "$PGRUN" ironclaw
       fi
-      psql -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       mkdir -p /var/lib/ironclaw
       export IRONCLAW_DATA_DIR=/var/lib/ironclaw
+
+      # Persist a SECRETS_MASTER_KEY so the onboard wizard skips the keychain
+      # step (no D-Bus secret service inside the sandbox). 32 random bytes
+      # hex-encoded = 64 chars; ironclaw treats env-var presence as authoritative
+      # and returns early from step_security().
+      _MK_FILE=/var/lib/ironclaw/master_key.hex
+      if [ ! -s "$_MK_FILE" ]; then
+        ${pkgs.openssl}/bin/openssl rand -hex 32 > "$_MK_FILE"
+        chmod 0600 "$_MK_FILE"
+      fi
+      export SECRETS_MASTER_KEY="$(cat "$_MK_FILE")"
     '';
   };
 
@@ -94,7 +88,7 @@
     curl
     # If pgvector is unavailable for postgresql_18 in your pinned nixpkgs,
     # fall back to postgresql_17.withPackages (p: [ p.pgvector ]).
-    (postgresql_18.withPackages (p: [ p.pgvector ]))
+    pgWithExt
     nix
     cacert
     openssl
@@ -124,6 +118,8 @@
     LANG = "C.UTF-8";
     EDITOR = "cat";
     PGHOST = "/run/postgresql";
-    DATABASE_URL = "postgres:///ironclaw?host=/run/postgresql";
+    DATABASE_URL = "postgres:///ironclaw?host=/run/postgresql&sslmode=disable";
+    DATABASE_BACKEND = "postgres";
+    DATABASE_SSLMODE = "disable";
   };
 }

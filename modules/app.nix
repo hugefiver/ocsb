@@ -37,6 +37,37 @@
       default = "";
       description = "Bash code executed inside sandbox right before app.package binary, runs as sandbox user with full env.";
     };
+
+    preserveCtty = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        If true (default), omit bwrap's --new-session flag so the sandboxed
+        process inherits the controlling tty. Required for interactive TUI
+        apps (ironclaw onboard wizard, --shell bash) — without ctty,
+        readline/raw-mode input sees EOF and the app exits or auto-skips
+        prompts.
+
+        Set false to enable bwrap's --new-session, which calls setsid() to
+        prevent TIOCSTI ioctl injection from inside the sandbox into the
+        host tty. Modern kernels (>= 5.17) restrict TIOCSTI by default
+        (dev.tty.legacy_tiocsti_restrict=1), making this mitigation largely
+        redundant. Only set false for non-interactive batch workloads on
+        older kernels where you explicitly want this hardening.
+      '';
+    };
+
+    runAsRoot = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        In filtered network mode, run sandbox as uid 0 to gain CAP_NET_ADMIN
+        for iptables RFC1918 blocking. Set false for apps that refuse to
+        run as root (e.g. postgres initdb). When false, sandbox runs as
+        host uid and iptables filtering is skipped (netns + slirp4netns +
+        --disable-host-loopback isolation still active).
+      '';
+    };
   };
 
 }
