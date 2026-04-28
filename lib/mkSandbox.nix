@@ -892,7 +892,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         prepare_container_rootfs
         build_container_plan_from_bwrap_args
         _MACHINE_NAME="ocsb-${cfg.app.name}-$(${pkgs.coreutils}/bin/printf '%s' "$OVERLAY_STATE_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
-        NSPAWN_ARGS=(--quiet --directory="$CONTAINER_ROOTFS" --machine="$_MACHINE_NAME" --chdir="$CONTAINER_WORKDIR")
+        NSPAWN_ARGS=(--quiet --directory="$CONTAINER_ROOTFS" --machine="$_MACHINE_NAME" --user="$(${pkgs.coreutils}/bin/id -u)" --chdir="$CONTAINER_WORKDIR")
         [[ "${networkMode}" == "blocked" ]] && NSPAWN_ARGS+=(--private-network)
         append_nspawn_mount_args
         append_nspawn_env_args
@@ -1162,6 +1162,18 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
 
     if [[ "$BACKEND_TYPE" != "bubblewrap" && "$WORKSPACE_STRATEGY" == "overlayfs" ]]; then
       echo "ocsb: backend '$BACKEND_TYPE' does not support workspace.strategy=overlayfs in v1; use direct, btrfs, git-worktree, or bubblewrap" >&2
+      exit 1
+    fi
+    if [[ "$BACKEND_TYPE" != "bubblewrap" && "${if dualLayerEnabled then "1" else "0"}" == "1" ]]; then
+      echo "ocsb: experimental.dualLayer is bubblewrap-only" >&2
+      exit 1
+    fi
+    if [[ "$BACKEND_TYPE" != "bubblewrap" && ''${#OVERLAY_MOUNTS[@]} -gt 0 ]]; then
+      echo "ocsb: backend '$BACKEND_TYPE' does not support --overlay-mount in v1" >&2
+      exit 1
+    fi
+    if [[ "$BACKEND_TYPE" == "systemd-nspawn" && "${networkMode}" == "filtered" ]]; then
+      echo "ocsb: backend 'systemd-nspawn' supports only host or blocked networking in v1" >&2
       exit 1
     fi
 
