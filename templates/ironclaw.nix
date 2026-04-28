@@ -103,7 +103,9 @@ in
   mounts.ro = [];
 
   workspace = {
-    # All persistent state lives under mounts.rw bind-mounts (home, data, pgdata, etc).
+    # App persistence lives under wrapper-managed mounts.rw (home, data,
+    # pgdata, etc). ocsb's own chroot/overlay state is redirected by the
+    # wrapper via OCSB_STATE_BASE_DIR so it is stable across launch cwd.
     # cwd is irrelevant to ironclaw, so skip CoW snapshot overhead and bind cwd directly.
     strategy = "direct";
     baseDir = ".ocsb";

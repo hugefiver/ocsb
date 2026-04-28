@@ -112,8 +112,10 @@
               pgdata/      PostgreSQL 18 cluster
               pgrun/       postgres unix socket
 
-            Workspace cache (under \$HOME/.cache/ocsb/<hash>/ironclaw/):
-              chroot/      relocated /nix/store (chroot mode, default)
+            Sandbox state (under \$PERSIST_DIR/state/ironclaw/):
+              chroot/      relocated /nix/store state
+              chroot/merged bind-mounted as /nix inside sandbox
+              overlay/     overlayfs upper/work state when used
 
             First run will: initdb, start postgres on unix socket, create
             'ironclaw' DB + load pgvector, then exec ironclaw. Run
@@ -182,12 +184,18 @@
               "$PERSIST_DIR/home" \
               "$PERSIST_DIR/data" \
               "$PERSIST_DIR/pgdata" \
-              "$PERSIST_DIR/pgrun"
+              "$PERSIST_DIR/pgrun" \
+              "$PERSIST_DIR/state"
 
             if [[ "$SHELL_MODE" -eq 1 ]]; then
               export OCSB_EXEC_OVERRIDE=1
               FILTERED_ARGS+=(-- ${pkgs.bashInteractive}/bin/bash -i)
             fi
+
+            # Ironclaw state is independent of the launch cwd. Keep ocsb's
+            # chroot/overlay workspace state under the stable persist dir
+            # instead of ~/.cache/ocsb/<project-hash>/ironclaw.
+            export OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"
 
             exec ${ironclawSandboxBase}/bin/ironclaw \
               --rw "$PERSIST_DIR/home:/home/sandbox" \
