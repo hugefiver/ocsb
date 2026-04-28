@@ -110,8 +110,11 @@ in
   };
 
   network = {
-    enable = true;
-    tunDevice = "Mihomo";
+    # Ironclaw starts postgres in preExecHook, and postgres refuses to run as
+    # uid 0. The filtered slirp4netns path currently requires uid 0 inside the
+    # bwrap user namespace so slirp can enter the network namespace. Use host
+    # networking for this template until the sandbox grows multi-uid mappings.
+    enable = null;
   };
 
   env = {

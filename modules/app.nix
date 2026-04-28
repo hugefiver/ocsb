@@ -61,11 +61,12 @@
       type = lib.types.bool;
       default = true;
       description = ''
-        In filtered network mode, run sandbox as uid 0 to gain CAP_NET_ADMIN
-        for iptables RFC1918 blocking. Set false for apps that refuse to
-        run as root (e.g. postgres initdb). When false, sandbox runs as
-        host uid and iptables filtering is skipped (netns + slirp4netns +
-        --disable-host-loopback isolation still active).
+        In filtered network mode, run sandbox as uid 0 so the host-side
+        slirp4netns helper can enter the sandbox network namespace and so
+        best-effort iptables RFC1918 blocking can run. Set false only for apps
+        that must not run as root (e.g. postgres initdb); such apps should use
+        host networking (network.enable = null) until multi-uid mappings are
+        supported.
       '';
     };
   };

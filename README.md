@@ -113,6 +113,8 @@
 
 覆盖：`OCSB_IRONCLAW_PERSIST_DIR=/path` 或 `--persist-dir /path`。
 
+**网络**：Ironclaw 默认共享宿主网络（`network.enable = null`）。原因是它的 postgres 初始化必须以非 root uid 运行，而当前 filtered/slirp4netns 模式需要沙盒内 uid 0 才能让宿主侧 slirp helper 进入网络 namespace。后续如果实现 multi-uid user namespace 映射，再恢复 filtered 网络隔离。
+
 **沙箱内 nix**：默认 `nixStoreMode = "chroot"` —— 首次启动 `nix copy` 把闭包搬到 `$workspace/chroot/nix/store`，bind-mount 进沙箱，可在沙箱内 `nix profile add nixpkgs#foo`（cache.nixos.org 可用）。可改 `experimental.nixStoreMode = "host-daemon"`（只读绑定宿主 `/nix/store`，写入走宿主 nix-daemon socket，需要宿主 daemon 权限策略收紧）或 `"closure"`（只挂闭包 RO，最小面）。`/nix/store` 不再使用 overlayfs：宿主 store 是 root-owned lower，unprivileged user namespace 下 copy-up 会遇到 ownership/permission 问题；workspace 的 `overlayfs` 策略不受影响。
 
 **升级到新 release**（保留最近 3 个版本）：
