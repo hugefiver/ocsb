@@ -1,7 +1,7 @@
 # mkSandbox — Core sandbox builder
 #
 # Evaluates user config through the Nix module system, then generates
-# a wrapped script that launches bubblewrap with proper isolation.
+# a wrapped script that launches a sandbox backend with proper isolation.
 #
 # Usage:
 #   mkSandbox { packages = [ pkgs.coreutils ]; workspace.strategy = "overlayfs"; }
@@ -103,6 +103,11 @@ let
   # When enabled: outer sandbox has host network, inner sandbox (per-command)
   # has full isolation (--unshare-all).  Overrides network.enable.
   dualLayerEnabled = cfg.experimental.dualLayer;
+
+  defaultBackend = cfg.backend.type;
+
+  podmanExtraArgs = lib.concatMapStringsSep " " lib.escapeShellArg cfg.backend.podman.extraArgs;
+  nspawnExtraArgs = lib.concatMapStringsSep " " lib.escapeShellArg cfg.backend.systemdNspawn.extraArgs;
 
   # Custom resolv.conf for slirp4netns (points to its virtual DNS at 10.0.2.3)
   customResolvConf = pkgs.writeText "ocsb-resolv.conf" "nameserver 10.0.2.3\n";
@@ -305,6 +310,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     fi
     }
 
+    BACKEND_TYPE=${lib.escapeShellArg defaultBackend}
+
     maybe_attach "$@"
 
     # Record this launcher pid so future --attach can find us.
@@ -319,7 +326,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # Helper: resolve ~ in paths at runtime
     # =========================================================
 
-    # For bwrap source (host side): ~ expands to real $HOME
+    # For backend source (host side): ~ expands to real $HOME
     resolve_host_path() {
       local p="$1"
       if [[ "$p" == "~/"* ]]; then
@@ -345,6 +352,125 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       local p="$1"
       [[ -d "$p" ]] || return 0
       ${pkgs.findutils}/bin/find "$p" -type d -exec ${pkgs.coreutils}/bin/chmod u+w {} + 2>/dev/null || true
+    }
+
+    append_container_mount_from_bwrap_flag() {
+      local _flag="$1"
+      local _src="$2"
+      local _dst="$3"
+      local _mode="rw"
+      [[ "$_flag" == "--ro-bind" || "$_flag" == "--ro-bind-try" ]] && _mode="ro"
+      if [[ "$_flag" == "--bind-try" || "$_flag" == "--ro-bind-try" ]]; then
+        [[ -e "$_src" ]] || return 0
+      fi
+      CONTAINER_MOUNT_SRCS+=("$_src")
+      CONTAINER_MOUNT_DSTS+=("$_dst")
+      CONTAINER_MOUNT_MODES+=("$_mode")
+    }
+
+    append_container_env_from_bwrap_flag() {
+      CONTAINER_ENV_NAMES+=("$1")
+      CONTAINER_ENV_VALUES+=("$2")
+    }
+
+    prepare_container_rootfs() {
+      CONTAINER_ROOTFS="$OVERLAY_STATE_DIR/rootfs"
+      ${pkgs.coreutils}/bin/mkdir -p \
+        "$CONTAINER_ROOTFS/usr/bin" \
+        "$CONTAINER_ROOTFS/nix/store" \
+        "$CONTAINER_ROOTFS/nix/var/nix" \
+        "$CONTAINER_ROOTFS/workspace" \
+        "$CONTAINER_ROOTFS/home/sandbox/.config" \
+        "$CONTAINER_ROOTFS/home/sandbox/.local" \
+        "$CONTAINER_ROOTFS/tmp" \
+        "$CONTAINER_ROOTFS/run" \
+        "$CONTAINER_ROOTFS/var/lib/postgresql" \
+        "$CONTAINER_ROOTFS/etc"
+      [[ -e "$CONTAINER_ROOTFS/bin" ]] || ${pkgs.coreutils}/bin/ln -s usr/bin "$CONTAINER_ROOTFS/bin"
+      [[ -e "$CONTAINER_ROOTFS/lib" ]] || ${pkgs.coreutils}/bin/ln -s usr/lib "$CONTAINER_ROOTFS/lib"
+      [[ -e "$CONTAINER_ROOTFS/lib64" ]] || ${pkgs.coreutils}/bin/ln -s usr/lib64 "$CONTAINER_ROOTFS/lib64"
+      ${pkgs.coreutils}/bin/mkdir -p "$CONTAINER_ROOTFS/usr/lib" "$CONTAINER_ROOTFS/usr/lib64"
+    }
+
+    build_container_plan_from_bwrap_args() {
+      CONTAINER_MOUNT_SRCS=()
+      CONTAINER_MOUNT_DSTS=()
+      CONTAINER_MOUNT_MODES=()
+      CONTAINER_ENV_NAMES=()
+      CONTAINER_ENV_VALUES=()
+      CONTAINER_WORKDIR="/workspace"
+
+      local _i=0
+      while [[ $_i -lt ''${#BWRAP_ARGS[@]} ]]; do
+        case "''${BWRAP_ARGS[$_i]}" in
+          --bind|--ro-bind|--bind-try|--ro-bind-try)
+            append_container_mount_from_bwrap_flag "''${BWRAP_ARGS[$_i]}" "''${BWRAP_ARGS[$((_i + 1))]}" "''${BWRAP_ARGS[$((_i + 2))]}"
+            _i=$((_i + 3))
+            ;;
+          --setenv)
+            append_container_env_from_bwrap_flag "''${BWRAP_ARGS[$((_i + 1))]}" "''${BWRAP_ARGS[$((_i + 2))]}"
+            _i=$((_i + 3))
+            ;;
+          --chdir)
+            CONTAINER_WORKDIR="''${BWRAP_ARGS[$((_i + 1))]}"
+            _i=$((_i + 2))
+            ;;
+          --overlay-src|--overlay)
+            echo "ocsb: backend '$BACKEND_TYPE' does not support overlayfs mounts; use bubblewrap for workspace.strategy=overlayfs or --overlay-mount" >&2
+            exit 1
+            ;;
+          --uid|--gid)
+            _i=$((_i + 2))
+            ;;
+          --unshare-all|--share-net|--die-with-parent|--new-session|--clearenv|--dev|--proc|--tmpfs|--dir|--symlink)
+            case "''${BWRAP_ARGS[$_i]}" in
+              --tmpfs|--dir) _i=$((_i + 2)) ;;
+              --dev|--proc) _i=$((_i + 2)) ;;
+              --symlink) _i=$((_i + 3)) ;;
+              *) _i=$((_i + 1)) ;;
+            esac
+            ;;
+          *)
+            _i=$((_i + 1))
+            ;;
+        esac
+      done
+    }
+
+    append_podman_mount_args() {
+      local _idx=0
+      while [[ $_idx -lt ''${#CONTAINER_MOUNT_SRCS[@]} ]]; do
+        PODMAN_ARGS+=(--volume "''${CONTAINER_MOUNT_SRCS[$_idx]}:''${CONTAINER_MOUNT_DSTS[$_idx]}:''${CONTAINER_MOUNT_MODES[$_idx]}")
+        _idx=$((_idx + 1))
+      done
+    }
+
+    append_podman_env_args() {
+      local _idx=0
+      while [[ $_idx -lt ''${#CONTAINER_ENV_NAMES[@]} ]]; do
+        PODMAN_ARGS+=(--env "''${CONTAINER_ENV_NAMES[$_idx]}=''${CONTAINER_ENV_VALUES[$_idx]}")
+        _idx=$((_idx + 1))
+      done
+    }
+
+    append_nspawn_mount_args() {
+      local _idx=0
+      while [[ $_idx -lt ''${#CONTAINER_MOUNT_SRCS[@]} ]]; do
+        if [[ "''${CONTAINER_MOUNT_MODES[$_idx]}" == "ro" ]]; then
+          NSPAWN_ARGS+=(--bind-ro="''${CONTAINER_MOUNT_SRCS[$_idx]}:''${CONTAINER_MOUNT_DSTS[$_idx]}")
+        else
+          NSPAWN_ARGS+=(--bind="''${CONTAINER_MOUNT_SRCS[$_idx]}:''${CONTAINER_MOUNT_DSTS[$_idx]}")
+        fi
+        _idx=$((_idx + 1))
+      done
+    }
+
+    append_nspawn_env_args() {
+      local _idx=0
+      while [[ $_idx -lt ''${#CONTAINER_ENV_NAMES[@]} ]]; do
+        NSPAWN_ARGS+=(--setenv="''${CONTAINER_ENV_NAMES[$_idx]}=''${CONTAINER_ENV_VALUES[$_idx]}")
+        _idx=$((_idx + 1))
+      done
     }
 
     build_git_metadata_flags() {
@@ -714,6 +840,70 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     }
 
     exec_sandbox() {
+      if [[ "$BACKEND_TYPE" == "podman" ]]; then
+        if [[ "${if dualLayerEnabled then "1" else "0"}" == "1" ]]; then
+          echo "ocsb: experimental.dualLayer is bubblewrap-only" >&2
+          exit 1
+        fi
+        if [[ "$WORKSPACE_STRATEGY" == "overlayfs" || ''${#OVERLAY_MOUNTS[@]} -gt 0 ]]; then
+          echo "ocsb: backend 'podman' does not support overlayfs workspace or --overlay-mount in v1" >&2
+          exit 1
+        fi
+        if ! command -v podman >/dev/null 2>&1; then
+          echo "ocsb: backend 'podman' requires podman on the host PATH" >&2
+          exit 1
+        fi
+        prepare_container_rootfs
+        build_container_plan_from_bwrap_args
+        _CONTAINER_NAME="ocsb-${cfg.app.name}-$(${pkgs.coreutils}/bin/printf '%s' "$OVERLAY_STATE_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
+        PODMAN_ARGS=(run --rm --name "$_CONTAINER_NAME" --userns=keep-id --user "$(${pkgs.coreutils}/bin/id -u):$(${pkgs.coreutils}/bin/id -g)" --workdir "$CONTAINER_WORKDIR")
+        case "${networkMode}" in
+          host) PODMAN_ARGS+=(--network host) ;;
+          blocked) PODMAN_ARGS+=(--network none) ;;
+          filtered) PODMAN_ARGS+=(--network slirp4netns:allow_host_loopback=false) ;;
+        esac
+        append_podman_mount_args
+        append_podman_env_args
+        if [[ -n "${podmanExtraArgs}" ]]; then
+          # shellcheck disable=SC2206
+          PODMAN_ARGS+=(${podmanExtraArgs})
+        fi
+        echo "$_CONTAINER_NAME" > "$OVERLAY_STATE_DIR/.backend-instance"
+        exec podman "''${PODMAN_ARGS[@]}" --rootfs "$CONTAINER_ROOTFS" "''${SANDBOX_CMD[@]}"
+      fi
+
+      if [[ "$BACKEND_TYPE" == "systemd-nspawn" ]]; then
+        if [[ "${if dualLayerEnabled then "1" else "0"}" == "1" ]]; then
+          echo "ocsb: experimental.dualLayer is bubblewrap-only" >&2
+          exit 1
+        fi
+        if [[ "$WORKSPACE_STRATEGY" == "overlayfs" || ''${#OVERLAY_MOUNTS[@]} -gt 0 ]]; then
+          echo "ocsb: backend 'systemd-nspawn' does not support overlayfs workspace or --overlay-mount in v1" >&2
+          exit 1
+        fi
+        if [[ "${networkMode}" == "filtered" ]]; then
+          echo "ocsb: backend 'systemd-nspawn' supports only host or blocked networking in v1" >&2
+          exit 1
+        fi
+        if ! command -v systemd-nspawn >/dev/null 2>&1; then
+          echo "ocsb: backend 'systemd-nspawn' requires systemd-nspawn on the host PATH" >&2
+          exit 1
+        fi
+        prepare_container_rootfs
+        build_container_plan_from_bwrap_args
+        _MACHINE_NAME="ocsb-${cfg.app.name}-$(${pkgs.coreutils}/bin/printf '%s' "$OVERLAY_STATE_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
+        NSPAWN_ARGS=(--quiet --directory="$CONTAINER_ROOTFS" --machine="$_MACHINE_NAME" --chdir="$CONTAINER_WORKDIR")
+        [[ "${networkMode}" == "blocked" ]] && NSPAWN_ARGS+=(--private-network)
+        append_nspawn_mount_args
+        append_nspawn_env_args
+        if [[ -n "${nspawnExtraArgs}" ]]; then
+          # shellcheck disable=SC2206
+          NSPAWN_ARGS+=(${nspawnExtraArgs})
+        fi
+        echo "$_MACHINE_NAME" > "$OVERLAY_STATE_DIR/.backend-instance"
+        exec systemd-nspawn "''${NSPAWN_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
+      fi
+
       ${if networkMode == "filtered" && !dualLayerEnabled then ''
       _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
       _SLIRP_PID=""
@@ -783,6 +973,13 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           CONTINUE=1; shift ;;
         --overwrite)
           OVERWRITE=1; shift ;;
+        --backend)
+          [[ $# -ge 2 ]] || { echo "ocsb: $1 requires a value" >&2; exit 1; }
+          case "$2" in
+            bubblewrap|podman|systemd-nspawn) BACKEND_TYPE="$2" ;;
+            *) echo "ocsb: unknown backend: $2" >&2; exit 1 ;;
+          esac
+          shift 2 ;;
         --ro|--rw)
           [[ $# -ge 2 ]] || { echo "ocsb: $1 requires HOST_PATH:SANDBOX_PATH" >&2; exit 1; }
           _MOUNT_FLAG="$1"
@@ -963,6 +1160,11 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       fi
     fi
 
+    if [[ "$BACKEND_TYPE" != "bubblewrap" && "$WORKSPACE_STRATEGY" == "overlayfs" ]]; then
+      echo "ocsb: backend '$BACKEND_TYPE' does not support workspace.strategy=overlayfs in v1; use direct, btrfs, git-worktree, or bubblewrap" >&2
+      exit 1
+    fi
+
     # =========================================================
     # Workspace directory setup
     # =========================================================
@@ -1068,6 +1270,14 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             exit 1
           fi
         fi
+        if [[ -f "$OVERLAY_STATE_DIR/.backend" ]]; then
+          EXISTING_BACKEND="$(< "$OVERLAY_STATE_DIR/.backend")"
+          if [[ "$EXISTING_BACKEND" != "$BACKEND_TYPE" ]]; then
+            echo "ocsb: workspace '$WORKSPACE_NAME' was created with backend '$EXISTING_BACKEND', cannot continue with '$BACKEND_TYPE'" >&2
+            echo "  Use --overwrite to recreate with a different backend." >&2
+            exit 1
+          fi
+        fi
         echo "ocsb: continuing workspace '$WORKSPACE_NAME'..." >&2
       else
         echo "ocsb: workspace '$WORKSPACE_NAME' already exists." >&2
@@ -1078,6 +1288,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
 
     ${pkgs.coreutils}/bin/mkdir -p "$WS_DIR"
     echo "$WORKSPACE_STRATEGY" > "$OVERLAY_STATE_DIR/.strategy"
+    echo "$BACKEND_TYPE" > "$OVERLAY_STATE_DIR/.backend"
 
     # =========================================================
     # Strategy-specific flags

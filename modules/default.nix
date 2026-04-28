@@ -8,6 +8,7 @@
     ./workspace.nix
     ./env.nix
     ./network.nix
+    ./backend.nix
     ./experimental.nix
   ];
 }
