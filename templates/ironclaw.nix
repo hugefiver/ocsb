@@ -7,7 +7,8 @@ let
 in
 {
   # nixStoreMode defaults to "chroot" — sandbox gets a real, writable
-  # /nix/store populated via `nix copy` on first launch. Override to
+  # /nix/store preseeded with hard links when possible, falling back to
+  # `nix copy` on first launch. Override to
   # "host-daemon" or "closure" via experimental.nixStoreMode if desired.
 
   app = {

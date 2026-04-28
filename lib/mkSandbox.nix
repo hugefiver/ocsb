@@ -293,10 +293,14 @@ let
 done < /proc/1/environ
 cd /workspace 2>/dev/null || cd /home/sandbox 2>/dev/null || cd /
 exec ${pkgs.bashInteractive}/bin/bash -i'
+      _NSENTER_ARGS=(
+        -t "$_INIT_PID"
+        -U --preserve-credentials
+        -m -p -i -u
+        ${lib.optionalString (networkMode != "host" && !dualLayerEnabled) ''-n''}
+      )
       exec ${pkgs.util-linux}/bin/nsenter \
-        -t "$_INIT_PID" \
-        -U --preserve-credentials \
-        -m -p -i -u -n \
+        "''${_NSENTER_ARGS[@]}" \
         -- ${pkgs.bashInteractive}/bin/bash -c "$_INNER_SCRIPT"
     fi
     }
@@ -392,7 +396,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     append_nix_store_args() {
       # /nix/store layout — see modules/experimental.nix nixStoreMode for tradeoffs.
       ${if cfg.experimental.nixStoreMode == "chroot" then ''
-      # Chroot store: relocated, writable nix store populated by `nix copy`.
+      # Chroot store: relocated, writable nix store populated by hard-link
+      # preseed when possible, with `nix copy` as the correctness fallback.
       # Sandbox sees a real /nix/store with cache-compatible prefix; can
       # `nix profile add nixpkgs#foo` and persist pkgs per-workspace.
       _CHROOT_ROOT="$OVERLAY_STATE_DIR/chroot"
@@ -402,7 +407,27 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       if [[ ! -f "$_CHROOT_MARKER" ]] || [[ "$(${pkgs.coreutils}/bin/cat "$_CHROOT_MARKER" 2>/dev/null)" != "$_CHROOT_SRC" ]]; then
         echo "ocsb: populating chroot nix store at $_CHROOT_ROOT (first run / closure changed; may take a while)..." >&2
         mapfile -t _CHROOT_PATHS < "$_CHROOT_SRC/store-paths"
-        if ! ${pkgs.nix}/bin/nix --extra-experimental-features "nix-command" copy \
+
+        _CHROOT_PRESEEDED=0
+        _CHROOT_DB_DUMP="$_CHROOT_ROOT/.valid-paths.dump"
+        ${pkgs.coreutils}/bin/rm -f "$_CHROOT_DB_DUMP"
+        if ${pkgs.coreutils}/bin/cp -al "''${_CHROOT_PATHS[@]}" "$_CHROOT_ROOT/nix/store/" 2>/dev/null && \
+           ${pkgs.nix}/bin/nix-store --dump-db "''${_CHROOT_PATHS[@]}" > "$_CHROOT_DB_DUMP" && \
+           ${pkgs.nix}/bin/nix-store --store "local?root=$_CHROOT_ROOT" --load-db < "$_CHROOT_DB_DUMP"; then
+          _CHROOT_PRESEEDED=1
+          echo "ocsb: chroot nix store preseeded with hard links" >&2
+        else
+          echo "ocsb: hard-link preseed unavailable; falling back to nix copy" >&2
+          ${pkgs.coreutils}/bin/chmod -R u+w "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix" 2>/dev/null || true
+          while IFS= read -r _CHROOT_PATH; do
+            ${pkgs.coreutils}/bin/rm -rf "$_CHROOT_ROOT$_CHROOT_PATH"
+          done < "$_CHROOT_SRC/store-paths"
+          ${pkgs.coreutils}/bin/rm -rf "$_CHROOT_ROOT/nix/var/nix/db"
+          ${pkgs.coreutils}/bin/mkdir -p "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix"
+        fi
+        ${pkgs.coreutils}/bin/rm -f "$_CHROOT_DB_DUMP"
+
+        if [[ "$_CHROOT_PRESEEDED" -ne 1 ]] && ! ${pkgs.nix}/bin/nix --extra-experimental-features "nix-command" copy \
             --no-check-sigs --offline \
             --to "local?root=$_CHROOT_ROOT" \
             "''${_CHROOT_PATHS[@]}" >&2; then

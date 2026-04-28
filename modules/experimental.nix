@@ -40,8 +40,9 @@
           A relocated, fully writable nix store lives at
           $OVERLAY_STATE_DIR/chroot/nix/{store,var/nix} on the host and is
           bind-mounted onto /nix/store and /nix/var/nix inside. On first
-          launch (and whenever the package set changes) the launcher runs
-          `nix copy` to populate it from the host store.
+          launch (and whenever the package set changes) the launcher first
+          tries to preseed it with hard links plus Nix DB registration, then
+          falls back to `nix copy` when hard linking is unavailable.
 
           Pros:
           - `nix profile add nixpkgs#foo` works inside the sandbox and can
@@ -52,9 +53,9 @@
           - No copy-up issues; the store is owned by the calling user.
 
           Cons:
-          - First launch performs a `nix copy` of the package closure into
-            the chroot directory (one-time per workspace, can be slow and
-            consumes disk).
+          - First launch may still perform a `nix copy` of the package closure
+            into the chroot directory when /nix/store and the workspace are on
+            different filesystems or hard links are blocked.
 
         "host-daemon":
           Bind-mount the host /nix/store read-only and the host
