@@ -16,7 +16,7 @@ assert() {
   fi
 }
 
-FLAKE_DIR="${1:?Usage: $0 <path-to-ocsb-flake>}"
+FLAKE_DIR="$(realpath "${1:?Usage: $0 <path-to-ocsb-flake>}")"
 
 echo "=== app.binPath assertion test ==="
 
