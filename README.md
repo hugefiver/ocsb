@@ -62,6 +62,25 @@
 | `git-worktree` | detached worktree；需 git 仓库 |
 | `direct` | 直接 bind 项目目录（无隔离） |
 
+## State 布局
+
+ocsb 的 workspace marker 仍在项目内的 `.ocsb/<workspace>/`，但 chroot/overlay/snapshot 等实现状态默认放在项目外：`~/.cache/ocsb/<project-hash>/<workspace>/`。可以用绝对路径环境变量 `OCSB_STATE_BASE_DIR=/path/to/state` 覆盖 state base；沙箱内会导出 `OCSB_STATE_DIR` 指向最终 workspace state 目录。
+
+典型目录：
+
+```text
+$OCSB_STATE_DIR/
+├── chroot/
+│   ├── .source
+│   └── merged/nix/{store,var/nix}/   # bind 到沙箱内 /nix
+├── overlay/
+│   ├── workspace/{upper,work}/       # workspace overlayfs
+│   └── mounts/ovl-*/{upper,work}/    # --overlay-mount
+└── snapshots/snap-*/                 # --snap-mount btrfs snapshot
+```
+
+`OCSB_STATE_BASE_DIR` 必须是绝对路径；相对路径会被拒绝，避免不同启动目录意外生成多份 state。`--overwrite` 会清理当前 workspace 的 chroot、overlay、snapshots，并兼容清理旧版根级 `upper/work`、`ovl-*`、`snap-*` 布局。手动清理旧 cache 时优先删具体旧 hash/workspace 目录；大型 chroot store 内含只读 Nix store 文件，清理脚本只 chmod 目录，不应对整棵 store 做递归 chmod。
+
 ## 网络模式
 
 | `network.enable` | 行为 |
