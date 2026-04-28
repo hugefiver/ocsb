@@ -88,7 +88,7 @@ $OCSB_STATE_DIR/
 
 默认 backend 是 `bubblewrap`，提供完整功能集。也可以在模块里设置 `backend.type = "podman"` / `"systemd-nspawn"`，或运行时用 `--backend podman`、`--backend systemd-nspawn` 临时切换。非 bubblewrap backend 仍复用 ocsb 的 workspace/state/Nix 预置逻辑：先准备 `.strategy`、锁、`OCSB_STATE_DIR`、chroot `/nix`、btrfs/git-worktree/snap-mount，再交给 Podman 或 systemd-nspawn 执行。
 
-v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、`git-worktree` workspace、`--ro`、`--rw`、`--snap-mount`，并复用 `experimental.nixStoreMode = "chroot" | "host-daemon" | "closure"`。`overlayfs` workspace、`--overlay-mount`、`experimental.dualLayer` 仍是 bubblewrap-only；如果需要这些能力请继续使用默认 backend。`network.enable = true` 在 Podman 下映射为 rootless slirp4netns（不声称与 bwrap iptables 过滤完全等价），在 systemd-nspawn v1 中会被拒绝；host/no-network 分别映射到 backend 原生网络模式。
+v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、`git-worktree` workspace、`--ro`、`--rw`、`--snap-mount`，并复用 `experimental.nixStoreMode = "chroot" | "host-daemon" | "closure"`。`overlayfs` workspace、`--overlay-mount`、`experimental.dualLayer` 仍是 bubblewrap-only；如果需要这些能力请继续使用默认 backend。Podman 用 keep-id 保持调用者身份；systemd-nspawn v1 用 `--user=$(id -u)` 运行 payload，但它通常仍需要宿主授权/root 运行 nspawn 本身。`network.enable = true` 在 Podman 下映射为 rootless slirp4netns（不声称与 bwrap iptables 过滤完全等价），在 systemd-nspawn v1 中会被拒绝；host/no-network 分别映射到 backend 原生网络模式。
 
 ## 网络模式
 

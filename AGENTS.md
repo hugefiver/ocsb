@@ -53,6 +53,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 - Podman/systemd-nspawn v1 reuse host-side prep: lock, `.strategy`, `OCSB_STATE_DIR`, chroot `/nix`, btrfs/git-worktree, `--ro`, `--rw`, and `--snap-mount`.
 - Podman/systemd-nspawn v1 intentionally reject `workspace.strategy=overlayfs`, `--overlay-mount`, and `experimental.dualLayer`; do not fake parity.
 - Podman maps host/blocked/filtered networking to native `host`/`none`/`slirp4netns:allow_host_loopback=false`; this is not the same as bwrap iptables private-range filtering.
+- systemd-nspawn v1 runs the payload with `--user=$(id -u)` but may still require privileged host authorization to start nspawn itself.
 - systemd-nspawn v1 supports host/no-network only; filtered networking must fail clearly.
 
 ## IRONCLAW CONTRACT
