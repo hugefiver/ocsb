@@ -38,7 +38,7 @@
 
         "chroot" (default, recommended):
           A relocated, fully writable nix store lives at
-          $OVERLAY_STATE_DIR/chroot/nix/{store,var/nix} on the host and is
+          $OVERLAY_STATE_DIR/chroot/merged/nix/{store,var/nix} on the host and is
           bind-mounted onto /nix/store and /nix/var/nix inside. On first
           launch (and whenever the package set changes) the launcher first
           tries to preseed it with hard links plus Nix DB registration, then

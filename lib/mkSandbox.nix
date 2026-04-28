@@ -341,6 +341,12 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       echo "$p"
     }
 
+    chmod_tree_dirs_writable() {
+      local p="$1"
+      [[ -d "$p" ]] || return 0
+      ${pkgs.findutils}/bin/find "$p" -type d -exec ${pkgs.coreutils}/bin/chmod u+w {} + 2>/dev/null || true
+    }
+
     build_git_metadata_flags() {
       # =========================================================
       # Git metadata: safe discovery via git rev-parse
@@ -400,16 +406,23 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       # preseed when possible, with `nix copy` as the correctness fallback.
       # Sandbox sees a real /nix/store with cache-compatible prefix; can
       # `nix profile add nixpkgs#foo` and persist pkgs per-workspace.
-      _CHROOT_ROOT="$OVERLAY_STATE_DIR/chroot"
-      _CHROOT_MARKER="$OVERLAY_STATE_DIR/.chroot-source"
+      _CHROOT_STATE_DIR="$OVERLAY_STATE_DIR/chroot"
+      _CHROOT_ROOT="$_CHROOT_STATE_DIR/merged"
+      _CHROOT_MARKER="$_CHROOT_STATE_DIR/.source"
       _CHROOT_SRC="${closureInfoDrv}"
+      ${pkgs.coreutils}/bin/mkdir -p "$_CHROOT_STATE_DIR"
+      if [[ -d "$_CHROOT_STATE_DIR/nix" && ! -d "$_CHROOT_ROOT/nix" ]]; then
+        echo "ocsb: migrating legacy chroot layout at $_CHROOT_STATE_DIR" >&2
+        chmod_tree_dirs_writable "$_CHROOT_STATE_DIR"
+        ${pkgs.coreutils}/bin/rm -rf "$_CHROOT_STATE_DIR/nix" "$_CHROOT_STATE_DIR/.chroot-source"
+      fi
       ${pkgs.coreutils}/bin/mkdir -p "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix"
       if [[ ! -f "$_CHROOT_MARKER" ]] || [[ "$(${pkgs.coreutils}/bin/cat "$_CHROOT_MARKER" 2>/dev/null)" != "$_CHROOT_SRC" ]]; then
         echo "ocsb: populating chroot nix store at $_CHROOT_ROOT (first run / closure changed; may take a while)..." >&2
         mapfile -t _CHROOT_PATHS < "$_CHROOT_SRC/store-paths"
 
         _CHROOT_PRESEEDED=0
-        _CHROOT_DB_DUMP="$_CHROOT_ROOT/.valid-paths.dump"
+        _CHROOT_DB_DUMP="$_CHROOT_STATE_DIR/.valid-paths.dump"
         ${pkgs.coreutils}/bin/rm -f "$_CHROOT_DB_DUMP"
         if ${pkgs.coreutils}/bin/cp -al "''${_CHROOT_PATHS[@]}" "$_CHROOT_ROOT/nix/store/" 2>/dev/null && \
            ${pkgs.nix}/bin/nix-store --dump-db "''${_CHROOT_PATHS[@]}" > "$_CHROOT_DB_DUMP" && \
@@ -418,7 +431,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           echo "ocsb: chroot nix store preseeded with hard links" >&2
         else
           echo "ocsb: hard-link preseed unavailable; falling back to nix copy" >&2
-          ${pkgs.coreutils}/bin/chmod -R u+w "$_CHROOT_ROOT/nix/store" "$_CHROOT_ROOT/nix/var/nix" 2>/dev/null || true
+          chmod_tree_dirs_writable "$_CHROOT_ROOT/nix/store"
+          chmod_tree_dirs_writable "$_CHROOT_ROOT/nix/var/nix"
           while IFS= read -r _CHROOT_PATH; do
             ${pkgs.coreutils}/bin/rm -rf "$_CHROOT_ROOT$_CHROOT_PATH"
           done < "$_CHROOT_SRC/store-paths"
@@ -473,6 +487,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         --setenv OCSB_WORKSPACE "$WORKSPACE_NAME"
         --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
         --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
+        --setenv OCSB_STATE_DIR "$OVERLAY_STATE_DIR"
         --setenv OCSB_HOST_UID "$(${pkgs.coreutils}/bin/id -u)"
         --setenv OCSB_HOST_GID "$(${pkgs.coreutils}/bin/id -g)"
         ${lib.optionalString dualLayerEnabled ''--setenv SHELL "${sandboxShell}"''}
@@ -520,12 +535,13 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
 
       case "$WORKSPACE_STRATEGY" in
         overlayfs)
-          ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
+          _WORKSPACE_OVERLAY_STATE="$OVERLAY_STATE_DIR/overlay/workspace"
+          ${pkgs.coreutils}/bin/mkdir -p "$_WORKSPACE_OVERLAY_STATE/upper" "$_WORKSPACE_OVERLAY_STATE/work"
           STRATEGY_FLAGS=(
             --overlay-src "$PROJECT_DIR"
-            --overlay "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work" /workspace
+            --overlay "$_WORKSPACE_OVERLAY_STATE/upper" "$_WORKSPACE_OVERLAY_STATE/work" /workspace
           )
-          echo "ocsb: overlay workspace at $OVERLAY_STATE_DIR" >&2
+          echo "ocsb: overlay workspace at $_WORKSPACE_OVERLAY_STATE" >&2
           ;;
         direct)
           STRATEGY_FLAGS=(
@@ -607,7 +623,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         _OVL_HOST="''${OVERLAY_MOUNTS[$_OVL_IDX]}"
         _OVL_SANDBOX="''${OVERLAY_MOUNTS[$_OVL_IDX+1]}"
         _OVL_HASH="$(echo -n "$_OVL_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
-        _OVL_STATE="$OVERLAY_STATE_DIR/ovl-$_OVL_HASH"
+        _OVL_STATE="$OVERLAY_STATE_DIR/overlay/mounts/ovl-$_OVL_HASH"
         ${pkgs.coreutils}/bin/mkdir -p "$_OVL_STATE/upper" "$_OVL_STATE/work"
         BWRAP_ARGS+=(--overlay-src "$_OVL_HOST" --overlay "$_OVL_STATE/upper" "$_OVL_STATE/work" "$_OVL_SANDBOX")
         echo "ocsb: overlay mount $_OVL_HOST -> $_OVL_SANDBOX (state: $_OVL_STATE)" >&2
@@ -620,7 +636,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         _SNAP_HOST="''${SNAP_MOUNTS[$_SNAP_IDX]}"
         _SNAP_SANDBOX="''${SNAP_MOUNTS[$_SNAP_IDX+1]}"
         _SNAP_HASH="$(echo -n "$_SNAP_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
-        _SNAP_DIR="$OVERLAY_STATE_DIR/snap-$_SNAP_HASH"
+        _SNAP_DIR="$OVERLAY_STATE_DIR/snapshots/snap-$_SNAP_HASH"
         if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$_SNAP_DIR" ]]; then
           echo "ocsb: reusing snapshot $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
         else
@@ -633,6 +649,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           if [[ -d "$_SNAP_DIR" ]]; then
             ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_SNAP_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_SNAP_DIR"
           fi
+          ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/snapshots"
           ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$_SNAP_HOST" "$_SNAP_DIR"
           echo "ocsb: snapshot mount $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
         fi
@@ -974,7 +991,16 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # Per-workspace lock and state (outside project tree — symlink-safe)
     # =========================================================
     PROJECT_HASH="$(echo -n "$PROJECT_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)"
-    OVERLAY_STATE_DIR="$HOME/.cache/ocsb/$PROJECT_HASH/$WORKSPACE_NAME"
+    if [[ -n "''${OCSB_STATE_BASE_DIR:-}" ]]; then
+      if [[ "$OCSB_STATE_BASE_DIR" != /* ]]; then
+        echo "ocsb: OCSB_STATE_BASE_DIR must be absolute: $OCSB_STATE_BASE_DIR" >&2
+        exit 1
+      fi
+      STATE_BASE_DIR="$(${pkgs.coreutils}/bin/realpath -m "$OCSB_STATE_BASE_DIR")"
+    else
+      STATE_BASE_DIR="$HOME/.cache/ocsb/$PROJECT_HASH"
+    fi
+    OVERLAY_STATE_DIR="$STATE_BASE_DIR/$WORKSPACE_NAME"
     ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR"
 
     LOCK_FILE="$OVERLAY_STATE_DIR/.lock"
@@ -1011,11 +1037,13 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         esac
         ${pkgs.coreutils}/bin/rm -rf "$WS_DIR"
         if [[ -d "$OVERLAY_STATE_DIR/chroot" ]]; then
-          ${pkgs.coreutils}/bin/chmod -R u+w "$OVERLAY_STATE_DIR/chroot" 2>/dev/null || true
+          chmod_tree_dirs_writable "$OVERLAY_STATE_DIR/chroot"
         fi
         ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/chroot" "$OVERLAY_STATE_DIR/.chroot-source"
-        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
-        # Clean per-directory overlay and snapshot state
+        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/overlay" "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
+        # Clean per-directory overlay and snapshot state. Keep the root-level
+        # ovl-*/snap-* loops as legacy cleanup for workspaces created before
+        # overlay/mounts and snapshots became separate state directories.
         for _d in "$OVERLAY_STATE_DIR"/ovl-*; do
           [[ -d "$_d" ]] && ${pkgs.coreutils}/bin/rm -rf "$_d"
         done
@@ -1024,6 +1052,12 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_d" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_d"
           fi
         done
+        for _d in "$OVERLAY_STATE_DIR"/snapshots/snap-*; do
+          if [[ -d "$_d" ]]; then
+            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_d" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_d"
+          fi
+        done
+        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/snapshots"
       elif [[ "$CONTINUE" -eq 1 ]]; then
         # Verify strategy matches what workspace was created with
         if [[ -f "$OVERLAY_STATE_DIR/.strategy" ]]; then

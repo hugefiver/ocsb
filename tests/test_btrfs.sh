@@ -9,7 +9,12 @@ if ! command -v btrfs &>/dev/null; then
 fi
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+cleanup() {
+  find "$TMPDIR" -type d -exec chmod u+w {} + 2>/dev/null || true
+  rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+export OCSB_STATE_BASE_DIR="$TMPDIR/state"
 
 if ! btrfs subvolume show "$TMPDIR" &>/dev/null 2>&1; then
   BTRFS_VOL="$TMPDIR/subvol"
@@ -61,7 +66,23 @@ assert "continue reuses existing snapshot" [ -d "$SNAP_DIR" ]
 (cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --overwrite -- -c true 2>/dev/null) || true
 assert "overwrite recreates snapshot" [ -d "$SNAP_DIR" ]
 
+SNAP_MOUNT_SRC="$TMPDIR/snap-mount-src"
+if btrfs subvolume create "$SNAP_MOUNT_SRC" &>/dev/null; then
+  echo "snap-mount-data" > "$SNAP_MOUNT_SRC/marker.txt"
+  (cd "$PROJECT_DIR" && "$OCSB_BIN" -w "snap-mount-test" --strategy direct --overwrite \
+    --snap-mount "$SNAP_MOUNT_SRC:/workspace/snap-data" -- \
+    -c 'cat /workspace/snap-data/marker.txt >/dev/null') || true
+  SNAP_HASH="$(echo -n "$SNAP_MOUNT_SRC" | sha256sum | cut -c1-12)"
+  SNAP_STATE="$OCSB_STATE_BASE_DIR/snap-mount-test/snapshots/snap-$SNAP_HASH"
+  assert "snap-mount state under snapshots" [ -d "$SNAP_STATE" ]
+  assert "snap-mount snapshot contains source file" [ -f "$SNAP_STATE/marker.txt" ]
+  assert "snap-mount has no legacy root snapshot state" [ ! -d "$OCSB_STATE_BASE_DIR/snap-mount-test/snap-$SNAP_HASH" ]
+else
+  echo "  SKIP: cannot create btrfs subvolume for snap-mount regression"
+fi
+
 btrfs subvolume delete "$SNAP_DIR" 2>/dev/null || rm -rf "$SNAP_DIR"
+btrfs subvolume delete "$SNAP_MOUNT_SRC" 2>/dev/null || rm -rf "$SNAP_MOUNT_SRC"
 rm -rf "$PROJECT_DIR/.ocsb/btrfs-test"
 
 echo ""

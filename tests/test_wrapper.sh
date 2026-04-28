@@ -39,7 +39,12 @@ assert_fails() {
 
 OCSB_BIN="${1:?Usage: $0 <path-to-ocsb-binary>}"
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+cleanup() {
+  find "$TMPDIR" -type d -exec chmod u+w {} + 2>/dev/null || true
+  rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+export OCSB_STATE_BASE_DIR="$TMPDIR/state"
 
 PROJECT_DIR="$TMPDIR/project"
 mkdir -p "$PROJECT_DIR"
@@ -131,13 +136,10 @@ assert "--overwrite with different strategy succeeds" \
   "$OCSB_BIN" -w "strat-test" --strategy overlayfs --overwrite -- -c true
 
 # Verify strategy marker was updated (now stored in cache dir)
-PROJ_HASH_STRAT="$(echo -n "$PROJECT_DIR" | sha256sum | cut -c1-16)"
-STRAT_MARKER="$(cat "$HOME/.cache/ocsb/$PROJ_HASH_STRAT/strat-test/.strategy" 2>/dev/null || echo MISSING)"
+STRAT_MARKER="$(cat "$OCSB_STATE_BASE_DIR/strat-test/.strategy" 2>/dev/null || echo MISSING)"
 assert "strategy marker updated after overwrite" [ "$STRAT_MARKER" = "overlayfs" ]
 
-chmod -R u+w "$HOME/.cache/ocsb/$PROJ_HASH_STRAT/strat-test" 2>/dev/null || true
 rm -rf "$PROJECT_DIR/.ocsb/strat-test"
-rm -rf "$HOME/.cache/ocsb/$PROJ_HASH_STRAT/strat-test"
 echo ""
 
 # --- Overlay state directory location ---
@@ -145,26 +147,63 @@ echo "--- overlay state location ---"
 
 "$OCSB_BIN" -w "test-overlay-loc" --strategy overlayfs --overwrite -- -c true 2>/dev/null || true
 
-PROJ_HASH="$(echo -n "$PROJECT_DIR" | sha256sum | cut -c1-16)"
-EXPECTED_STATE="$HOME/.cache/ocsb/$PROJ_HASH/test-overlay-loc"
+EXPECTED_STATE="$OCSB_STATE_BASE_DIR/test-overlay-loc"
 
-assert "overlay state dir at ~/.cache/ocsb" [ -d "$EXPECTED_STATE" ]
-assert "overlay upper dir exists" [ -d "$EXPECTED_STATE/upper" ]
-assert "overlay work dir exists" [ -d "$EXPECTED_STATE/work" ]
+assert "overlay state dir at custom state base" [ -d "$EXPECTED_STATE" ]
+assert "overlay upper dir exists" [ -d "$EXPECTED_STATE/overlay/workspace/upper" ]
+assert "overlay work dir exists" [ -d "$EXPECTED_STATE/overlay/workspace/work" ]
 assert_not "no upper inside .ocsb" [ -d "$PROJECT_DIR/.ocsb/test-overlay-loc/upper" ]
 
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 "$OCSB_BIN" -w "test-overlay-loc" --strategy overlayfs --continue -- \
   -c 'echo uid-test > /workspace/.ocsb_uid_test'
-UID_TEST_FILE="$(find "$EXPECTED_STATE/upper" -name .ocsb_uid_test -type f -print -quit)"
+UID_TEST_FILE="$(find "$EXPECTED_STATE/overlay/workspace/upper" -name .ocsb_uid_test -type f -print -quit)"
 assert "overlay write lands in upper" [ -n "$UID_TEST_FILE" ]
 assert "overlay upper file owned by host uid" [ "$(stat -c %u "$UID_TEST_FILE")" = "$HOST_UID" ]
 assert "overlay upper file owned by host gid" [ "$(stat -c %g "$UID_TEST_FILE")" = "$HOST_GID" ]
 
-chmod -R u+w "$EXPECTED_STATE" 2>/dev/null || true
+find "$EXPECTED_STATE" -type d -exec chmod u+w {} + 2>/dev/null || true
 rm -rf "$EXPECTED_STATE"
 rm -rf "$PROJECT_DIR/.ocsb/test-overlay-loc"
+echo ""
+
+# --- Custom state base directory ---
+echo "--- custom state base ---"
+
+CUSTOM_STATE_BASE="$(mktemp -d)"
+CUSTOM_STATE_OUTPUT=$(OCSB_STATE_BASE_DIR="$CUSTOM_STATE_BASE" \
+  "$OCSB_BIN" -w "stable-state" --strategy overlayfs --overwrite -- -c 'printf %s "$OCSB_STATE_DIR"')
+
+assert "custom state base exports exact OCSB_STATE_DIR" [ "$CUSTOM_STATE_OUTPUT" = "$CUSTOM_STATE_BASE/stable-state" ]
+OCSB_STATE_BASE_DIR="$CUSTOM_STATE_BASE" \
+  "$OCSB_BIN" -w "stable-state" --strategy overlayfs --overwrite -- -c 'test -n "$OCSB_STATE_DIR"'
+
+assert "custom state base creates workspace state" [ -d "$CUSTOM_STATE_BASE/stable-state" ]
+assert "custom state base stores overlay separately" [ -d "$CUSTOM_STATE_BASE/stable-state/overlay/workspace/upper" ]
+assert_not "custom state base avoids default test state" [ -d "$OCSB_STATE_BASE_DIR/stable-state" ]
+assert_fails "rejects relative custom state base" \
+  env OCSB_STATE_BASE_DIR="relative-state" "$OCSB_BIN" -w "relative-state" --strategy direct -- -c true
+
+find "$CUSTOM_STATE_BASE" -type d -exec chmod u+w {} + 2>/dev/null || true
+rm -rf "$CUSTOM_STATE_BASE" "$PROJECT_DIR/.ocsb/stable-state"
+echo ""
+
+# --- Legacy chroot layout migration ---
+echo "--- legacy chroot migration ---"
+
+LEGACY_STATE="$OCSB_STATE_BASE_DIR/legacy-chroot"
+mkdir -p "$LEGACY_STATE/chroot/nix/store" "$LEGACY_STATE/chroot/nix/var/nix"
+touch "$LEGACY_STATE/chroot/.chroot-source"
+
+"$OCSB_BIN" -w "legacy-chroot" --strategy direct --overwrite -- -c true
+
+assert "legacy chroot migrated to merged layout" [ -d "$LEGACY_STATE/chroot/merged/nix/store" ]
+assert_not "legacy chroot nix directory removed" [ -e "$LEGACY_STATE/chroot/nix" ]
+assert_not "legacy chroot marker removed" [ -e "$LEGACY_STATE/chroot/.chroot-source" ]
+
+find "$LEGACY_STATE" -type d -exec chmod u+w {} + 2>/dev/null || true
+rm -rf "$LEGACY_STATE" "$PROJECT_DIR/.ocsb/legacy-chroot"
 echo ""
 
 # --- Store closure strictness ---
@@ -341,7 +380,11 @@ assert "overlay-mount: source data readable" [ "$OVL_OUTPUT" = "overlay-test-dat
   --overlay-mount "$OVL_SRC:/workspace/ovl-test" -- \
   -c 'echo modified > /workspace/ovl-test/marker.txt' 2>/dev/null || true
 OVL_ORIG="$(cat "$OVL_SRC/marker.txt")"
+OVL_HASH="$(echo -n "$OVL_SRC" | sha256sum | cut -c1-12)"
+OVL_STATE="$OCSB_STATE_BASE_DIR/test-ovl-mount/overlay/mounts/ovl-$OVL_HASH"
 assert "overlay-mount: source not modified by writes" [ "$OVL_ORIG" = "overlay-test-data" ]
+assert "overlay-mount: state under overlay/mounts" [ -d "$OVL_STATE/upper" ]
+assert_not "overlay-mount: no legacy root ovl state" [ -d "$OCSB_STATE_BASE_DIR/test-ovl-mount/ovl-$OVL_HASH" ]
 
 # Validation: relative host path rejected
 assert_fails "overlay-mount rejects relative host path" \
