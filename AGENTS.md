@@ -1,11 +1,11 @@
 # PROJECT KNOWLEDGE BASE
 
-**Branch:** dev
+**Branch:** master
 **Scope:** ocsb sandbox framework, Nix flake packaging, wrapper tests
 
 ## OVERVIEW
 
-ocsb is a bubblewrap-based Nix sandbox framework. The core is a generated launcher in `lib/mkSandbox.nix`; templates and modules feed it declarative options, while shell tests exercise wrapper behavior on Linux.
+ocsb is a Nix sandbox framework with bubblewrap as the default runtime backend and optional Podman/systemd-nspawn runners. The core is a generated launcher in `lib/mkSandbox.nix`; templates and modules feed it declarative options, while shell tests exercise wrapper behavior on Linux.
 
 ## STRUCTURE
 
@@ -13,7 +13,7 @@ ocsb is a bubblewrap-based Nix sandbox framework. The core is a generated launch
 ./
 ├── flake.nix              # package/check outputs, Ironclaw wrapper matrix
 ├── lib/mkSandbox.nix      # generated ocsb launcher and runtime state logic
-├── modules/               # Nix module options for app/env/mounts/network/workspace/experimental
+├── modules/               # Nix module options for app/env/mounts/network/workspace/backend/experimental
 ├── templates/             # app presets: OpenCode and Ironclaw
 ├── pkgs/ironclaw.nix      # Ironclaw Rust package derivation and fixed-output deps
 ├── tests/test_*.sh        # wrapper, strategy, network, and Ironclaw regression tests
@@ -28,6 +28,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 |---|---|---|
 | Change runtime launcher behavior | `lib/mkSandbox.nix` | Generated shell script; verify with wrapper tests. |
 | Add/change options | `modules/*.nix` | Keep README and tests in sync. |
+| Change runtime backend support | `modules/backend.nix`, `lib/mkSandbox.nix`, `tests/test_backend.sh` | Preserve bubblewrap default and explicit non-bwrap support boundaries. |
 | Change Ironclaw sandbox | `flake.nix`, `templates/ironclaw.nix`, `tests/test_ironclaw.sh` | Wrapper owns persist dir and state redirection. |
 | Change `/nix/store` mode | `lib/mkSandbox.nix`, `modules/experimental.nix` | Do not reintroduce overlayfs on `/nix/store`. |
 | Change workspace strategies | `lib/mkSandbox.nix`, `tests/test_wrapper.sh`, strategy-specific tests | Keep state layout and cleanup covered. |
@@ -43,6 +44,16 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 - `--overlay-mount` state lives under `$OCSB_STATE_DIR/overlay/mounts/ovl-<hash>/{upper,work}`.
 - `--snap-mount` state lives under `$OCSB_STATE_DIR/snapshots/snap-<hash>` and requires the source to be a btrfs subvolume root.
 - Legacy cleanup must continue removing old root-level `upper/work`, `ovl-*`, `snap-*`, and old `chroot/nix` layouts.
+
+## BACKEND CONTRACT
+
+- Default backend is `bubblewrap`; it remains the only full-parity backend.
+- `backend.type` accepts `bubblewrap`, `podman`, `systemd-nspawn`; runtime override is `--backend ...`.
+- Backend identity is recorded as `$OCSB_STATE_DIR/.backend`; do not add backend names into the state path layout.
+- Podman/systemd-nspawn v1 reuse host-side prep: lock, `.strategy`, `OCSB_STATE_DIR`, chroot `/nix`, btrfs/git-worktree, `--ro`, `--rw`, and `--snap-mount`.
+- Podman/systemd-nspawn v1 intentionally reject `workspace.strategy=overlayfs`, `--overlay-mount`, and `experimental.dualLayer`; do not fake parity.
+- Podman maps host/blocked/filtered networking to native `host`/`none`/`slirp4netns:allow_host_loopback=false`; this is not the same as bwrap iptables private-range filtering.
+- systemd-nspawn v1 supports host/no-network only; filtered networking must fail clearly.
 
 ## IRONCLAW CONTRACT
 
@@ -64,6 +75,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 ## ANTI-PATTERNS
 
 - Do not put `/nix/store` on overlayfs: root-owned lower + unprivileged userns copy-up causes ownership/permission failures.
+- Do not claim Podman/systemd-nspawn overlay or filtered-network parity unless covered by tests.
 - Do not make Ironclaw state depend on cwd or project hash.
 - Do not remove legacy layout cleanup without replacing tests.
 - Do not split implementation changes from their shell regression tests when committing.
@@ -75,6 +87,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 nix flake check --no-build
 nix build .#packages.x86_64-linux.default
 bash tests/test_wrapper.sh ./result/bin/ocsb
+bash tests/test_backend.sh .
 bash tests/test_binpath.sh .
 bash tests/test_git_worktree.sh ./result/bin/ocsb
 bash tests/test_btrfs.sh ./result/bin/ocsb     # may SKIP without btrfs perms

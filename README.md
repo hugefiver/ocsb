@@ -41,6 +41,9 @@
 # 指定 workspace 策略
 ./result/bin/ocsb -w my-feature --strategy git-worktree
 
+# 临时切换 runtime backend（默认 bubblewrap）
+./result/bin/ocsb --backend podman --strategy direct -- echo hi
+
 # 临时 bind mount
 ./result/bin/ocsb --ro ~/data:/workspace/data --rw /tmp/out:/workspace/out
 
@@ -81,6 +84,12 @@ $OCSB_STATE_DIR/
 
 `OCSB_STATE_BASE_DIR` 必须是绝对路径；相对路径会被拒绝，避免不同启动目录意外生成多份 state。`--overwrite` 会清理当前 workspace 的 chroot、overlay、snapshots，并兼容清理旧版根级 `upper/work`、`ovl-*`、`snap-*` 布局。手动清理旧 cache 时优先删具体旧 hash/workspace 目录；大型 chroot store 内含只读 Nix store 文件，清理脚本只 chmod 目录，不应对整棵 store 做递归 chmod。
 
+## Runtime backend
+
+默认 backend 是 `bubblewrap`，提供完整功能集。也可以在模块里设置 `backend.type = "podman"` / `"systemd-nspawn"`，或运行时用 `--backend podman`、`--backend systemd-nspawn` 临时切换。非 bubblewrap backend 仍复用 ocsb 的 workspace/state/Nix 预置逻辑：先准备 `.strategy`、锁、`OCSB_STATE_DIR`、chroot `/nix`、btrfs/git-worktree/snap-mount，再交给 Podman 或 systemd-nspawn 执行。
+
+v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、`git-worktree` workspace、`--ro`、`--rw`、`--snap-mount`，并复用 `experimental.nixStoreMode = "chroot" | "host-daemon" | "closure"`。`overlayfs` workspace、`--overlay-mount`、`experimental.dualLayer` 仍是 bubblewrap-only；如果需要这些能力请继续使用默认 backend。`network.enable = true` 在 Podman 下映射为 rootless slirp4netns（不声称与 bwrap iptables 过滤完全等价），在 systemd-nspawn v1 中会被拒绝；host/no-network 分别映射到 backend 原生网络模式。
+
 ## 网络模式
 
 | `network.enable` | 行为 |
@@ -109,6 +118,8 @@ $OCSB_STATE_DIR/
         mounts.rw = [];
 
         workspace = { strategy = "auto"; baseDir = ".ocsb"; name = "_"; };
+
+        backend.type = "bubblewrap";        # 或 "podman" / "systemd-nspawn"
 
         network.enable = true;             # 过滤模式
 
@@ -180,6 +191,7 @@ nix.settings.extra-trusted-public-keys = [
 ```bash
 nix build .#packages.x86_64-linux.default
 bash tests/test_wrapper.sh ./result/bin/ocsb
+bash tests/test_backend.sh .
 bash tests/test_binpath.sh .
 bash tests/test_git_worktree.sh ./result/bin/ocsb
 bash tests/test_btrfs.sh ./result/bin/ocsb     # 无权限自动 SKIP
