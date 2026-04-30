@@ -205,4 +205,4 @@ bash tests/test_ironclaw.sh ./result/bin/ocsb-ironclaw
 
 ## License
 
-[MIT](LICENSE)
+[Anti American AI Public License](https://github.com/hugefiver/AAAPL) - See [LICENSE](LICENSE) for details.
