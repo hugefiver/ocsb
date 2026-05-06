@@ -12,10 +12,12 @@ let
   # git dep — extra (unmatched) entries are silently dropped.
   cargoLockText = builtins.readFile "${ironclaw-src}/Cargo.lock";
   allOutputHashes = {
+    "monty-0.0.16" = "sha256-UpHGCuoId8zNju3sQeSnt8J6Jh24na2u9/zDWrZKQWs=";
     "monty-0.0.11" = "sha256-PRP8XcgeNVnc+2dWHxpizjvAtSjfqtkEXckXjPCRoJI=";
     "monty-0.0.9" = "sha256-lIuPWXuovY4TB5M7JUCDAIN97bo1X8B6MhL3UjFTnqA=";
     "ruff_python_ast-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";
     "ruff_python_parser-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";
+    "ruff_python_stdlib-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";
     "ruff_python_trivia-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";
     "ruff_source_file-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";
     "ruff_text_size-0.0.0" = "sha256-nVQC4ZaLWiZBUEReLqzpXKxXVxCdUW6b+mda9J8JSA0=";

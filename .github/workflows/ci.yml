@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [v0_26_0, v0_25_0, v0_24_0]
+        version: [v0_27_0, v0_26_0]
         arch: ['', x86_64_v3]
     steps:
       - uses: actions/checkout@v4

@@ -6,26 +6,22 @@
 
     # Track ironclaw releases. The "latest" alias (`ironclaw-src`) points at the
     # newest tag we ship; older releases are pinned independently and remain
-    # buildable as `ironclaw_v0_25_0`, `ironclaw_v0_24_0`, etc. To bump:
+    # buildable as `ironclaw_v0_26_0`, etc. To bump:
     #   1. Move `ironclaw-src` to the new release tag.
     #   2. Add the previous tag here (e.g. ironclaw-src-v0_26_0) and register it
     #      in `ironclawVersions` below.
-    #   3. Drop the oldest entry if the kept-window grows beyond 3 releases.
+    #   3. Drop the oldest entry if the kept-window grows beyond 2 releases.
     ironclaw-src = {
-      url = "github:nearai/ironclaw/ironclaw-v0.26.0";
+      url = "github:nearai/ironclaw/ironclaw-v0.27.0";
       flake = false;
     };
-    ironclaw-src-v0_25_0 = {
-      url = "github:nearai/ironclaw/23fe1826842be5ac50bbac729f29d9d0d3ec8847";
-      flake = false;
-    };
-    ironclaw-src-v0_24_0 = {
-      url = "github:nearai/ironclaw/9bb699e95b08d11af0459fab1b70d51ccd55cf20";
+    ironclaw-src-v0_26_0 = {
+      url = "github:nearai/ironclaw/15b1f14149511ef5d256cc9aab15651fd3de0bdb";
       flake = false;
     };
   };
 
-  outputs = inputs@{ self, nixpkgs, ironclaw-src, ironclaw-src-v0_25_0, ironclaw-src-v0_24_0, ... }:
+  outputs = inputs@{ self, nixpkgs, ironclaw-src, ironclaw-src-v0_26_0, ... }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
@@ -36,9 +32,8 @@
       # Latest first. The first entry's package becomes the unversioned
       # `ironclaw` / `ironclaw-sandbox` aliases.
       ironclawVersions = [
-        { slug = "v0_26_0"; version = "0.26.0"; src = ironclaw-src; }
-        { slug = "v0_25_0"; version = "0.25.0"; src = ironclaw-src-v0_25_0; }
-        { slug = "v0_24_0"; version = "0.24.0"; src = ironclaw-src-v0_24_0; }
+        { slug = "v0_27_0"; version = "0.27.0"; src = ironclaw-src; }
+        { slug = "v0_26_0"; version = "0.26.0"; src = ironclaw-src-v0_26_0; }
       ];
 
       # Micro-architecture variants. The first entry is the unsuffixed default
@@ -72,7 +67,7 @@
 
           # `slug` is empty for the latest alias (-> `ocsb-ironclaw`,
           # persist dir `~/.cache/ocsb/ironclaw/`). For non-latest builds
-          # `slug` becomes "_v0_25_0" so wrappers and persist dirs are
+          # `slug` becomes "_v0_26_0" so wrappers and persist dirs are
           # distinct per version.
           mkSandboxBin = { slug, ironclawSandboxBase }: pkgs.writeShellScriptBin "ocsb-ironclaw${slug}" ''
             set -euo pipefail

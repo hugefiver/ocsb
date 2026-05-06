@@ -3,6 +3,23 @@
     "ironclaw-src": {
       "flake": false,
       "locked": {
+        "lastModified": 1777442503,
+        "narHash": "sha256-dCXnsoruv6aargIEcQlGnZ62m6N59TAsoxiWULat5+Q=",
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "93c7d6a484237999a7a202efd6d54f70d785c0b7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nearai",
+        "ref": "ironclaw-v0.27.0",
+        "repo": "ironclaw",
+        "type": "github"
+      }
+    },
+    "ironclaw-src-v0_26_0": {
+      "flake": false,
+      "locked": {
         "lastModified": 1776749829,
         "narHash": "sha256-Dgc3tg5Dk+l9+OMvU+gzNICOrpaIgDhNWEbHqOf8sxo=",
         "owner": "nearai",
@@ -12,42 +29,8 @@
       },
       "original": {
         "owner": "nearai",
-        "ref": "ironclaw-v0.26.0",
         "repo": "ironclaw",
-        "type": "github"
-      }
-    },
-    "ironclaw-src-v0_24_0": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1774971541,
-        "narHash": "sha256-DtlHp53PVu+25wusCu1e4gGK9LHPt3i6jqQup0atF/0=",
-        "owner": "nearai",
-        "repo": "ironclaw",
-        "rev": "9bb699e95b08d11af0459fab1b70d51ccd55cf20",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nearai",
-        "repo": "ironclaw",
-        "rev": "9bb699e95b08d11af0459fab1b70d51ccd55cf20",
-        "type": "github"
-      }
-    },
-    "ironclaw-src-v0_25_0": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1775869191,
-        "narHash": "sha256-d6pSqQ5e0nFIg74VTu3tUQHXj3Fosv/p7UIKLN1yjaQ=",
-        "owner": "nearai",
-        "repo": "ironclaw",
-        "rev": "23fe1826842be5ac50bbac729f29d9d0d3ec8847",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nearai",
-        "repo": "ironclaw",
-        "rev": "23fe1826842be5ac50bbac729f29d9d0d3ec8847",
+        "rev": "15b1f14149511ef5d256cc9aab15651fd3de0bdb",
         "type": "github"
       }
     },
@@ -70,8 +53,7 @@
     "root": {
       "inputs": {
         "ironclaw-src": "ironclaw-src",
-        "ironclaw-src-v0_24_0": "ironclaw-src-v0_24_0",
-        "ironclaw-src-v0_25_0": "ironclaw-src-v0_25_0",
+        "ironclaw-src-v0_26_0": "ironclaw-src-v0_26_0",
         "nixpkgs": "nixpkgs"
       }
     }
