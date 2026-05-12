@@ -66,56 +66,161 @@
           });
 
           # `slug` is empty for the latest alias (-> `ocsb-ironclaw`,
-          # persist dir `~/.cache/ocsb/ironclaw/`). For non-latest builds
-          # `slug` becomes "_v0_27_0" so wrappers and persist dirs are
-          # distinct per version.
+          # persist dir `~/.cache/ocsb/ironclaw/`). For non-empty slugs,
+          # wrappers and default persist dirs are variant-specific
+          # (`~/.cache/ocsb/ironclaw_<variant>/`).
           mkSandboxBin = { slug, ironclawSandboxBase }: pkgs.writeShellScriptBin "ocsb-ironclaw${slug}" ''
             set -euo pipefail
 
             VARIANT="ironclaw${slug}"
+            VARIANT_SAFE="$VARIANT"
+            VARIANT_SAFE="''${VARIANT_SAFE//[^A-Za-z0-9_.-]/-}"
+            VARIANT_SAFE="''${VARIANT_SAFE//_/-}"
+            DB_ENV_FILE_SANDBOX="/tmp/ocsb-ironclaw-db.env"
+
             PERSIST_DIR=""
             FILTERED_ARGS=()
             HAS_CONTINUE_OR_OVERWRITE=0
             SHELL_MODE=0
+
+            DB_MODE="''${OCSB_IRONCLAW_DB_MODE:-embedded}"
+            DB_SIDECAR_RUNTIME="''${OCSB_IRONCLAW_DB_SIDECAR_RUNTIME:-podman}"
+            DB_SIDECAR_CONTAINER="''${OCSB_IRONCLAW_DB_SIDECAR_CONTAINER:-}"
+            DB_SIDECAR_IMAGE="''${OCSB_IRONCLAW_DB_SIDECAR_IMAGE:-docker.io/pgvector/pgvector:pg18}"
+            DB_SIDECAR_PORT="''${OCSB_IRONCLAW_DB_SIDECAR_PORT:-55432}"
+            DB_SIDECAR_DB="ironclaw"
+            DB_SIDECAR_USER="ironclaw"
+            DB_ENV_HOST_FILE=""
 
             usage() {
               cat <<EOF
             Usage: ocsb-$VARIANT [OPTIONS] [-- COMMAND...]
 
             Run NEAR AI Ironclaw inside an isolated ocsb sandbox with persistent
-            postgres + pgvector and a sandboxed Nix environment.
+            app state and selectable database mode.
 
             Options:
-              --persist-dir DIR     Override persistent state directory.
-                                    Default: \$HOME/.cache/ocsb/ironclaw
-                                    (shared across all ironclaw variants).
-              -w, --workspace NAME  Workspace name (passed through to ocsb).
-              -s, --shell           Drop into bash inside the sandbox instead
-                                    of starting ironclaw (postgres still set up).
-              --attach              Attach to the currently-running sandbox
-                                    instance (shares its postgres, env, mounts).
-                                    Use --attach=PID to target a specific bwrap.
-              -h, --help            Show this help and exit.
-              --                    Pass remaining args to ironclaw / shell.
+              --persist-dir DIR              Override persistent state directory.
+                                            Default: \$HOME/.cache/ocsb/\$VARIANT
+                                            (latest alias uses \$HOME/.cache/ocsb/ironclaw).
+              --db-mode MODE                Database mode: embedded|external|sidecar.
+                                            Default: embedded.
+              --db-sidecar-runtime RUNTIME  Sidecar OCI runtime: podman|docker.
+                                            Default: podman.
+              --db-sidecar-container NAME   Sidecar container name.
+                                            Default: variant-specific stable name.
+              --db-sidecar-image IMAGE      Sidecar image.
+                                            Default: docker.io/pgvector/pgvector:pg18.
+              --db-sidecar-port PORT        Host loopback port mapped to sidecar 5432.
+                                            Default: 55432.
+              -w, --workspace NAME          Workspace name (passed through to ocsb).
+              -s, --shell                   Drop into bash inside the sandbox instead
+                                            of starting ironclaw.
+              --attach                      Attach to the currently-running sandbox
+                                            instance (shares its env and mounts).
+                                            Use --attach=PID to target a specific bwrap.
+              --env NAME[=VALUE]            Forward non-DB env to inner ocsb.
+                                            In external/sidecar mode, Ironclaw DB
+                                            env names are captured to a private file
+                                            and not forwarded as inner --env args.
+              -h, --help                    Show this help and exit.
+              --                            Pass remaining args to ironclaw / shell.
 
             Environment:
-              OCSB_IRONCLAW_PERSIST_DIR  Same as --persist-dir.
+              OCSB_IRONCLAW_PERSIST_DIR              Same as --persist-dir.
+              OCSB_IRONCLAW_DB_MODE                 Same as --db-mode.
+              OCSB_IRONCLAW_DB_SIDECAR_RUNTIME      Same as --db-sidecar-runtime.
+              OCSB_IRONCLAW_DB_SIDECAR_CONTAINER    Same as --db-sidecar-container.
+              OCSB_IRONCLAW_DB_SIDECAR_IMAGE        Same as --db-sidecar-image.
+              OCSB_IRONCLAW_DB_SIDECAR_PORT         Same as --db-sidecar-port.
+
+            DB modes:
+              embedded  Default behavior: init/start local postgres + pgvector in sandbox.
+              external  Require caller-provided DATABASE_URL; no local postgres startup.
+              sidecar   Host wrapper ensures OCI postgres+pgvector container is up,
+                        synthesizes DATABASE_URL, writes DB env into private file,
+                        mounts it read-only, then sandbox preExec sources it.
 
             Persistent layout (under \$PERSIST_DIR):
-              home/        \$HOME inside sandbox (config, history)
-              data/        ironclaw application data
-              pgdata/      PostgreSQL 18 cluster
-              pgrun/       postgres unix socket
+              home/            \$HOME inside sandbox (config, history)
+              data/            ironclaw application data
+              workspace/       stable /workspace for ironclaw launches
+              pgdata/          embedded postgres cluster data
+              pgrun/           embedded postgres unix socket
+              pgdata-sidecar/  sidecar postgres data directory
+              sidecar-db-password  generated sidecar DB password (0600)
 
             Sandbox state (under \$PERSIST_DIR/state/ironclaw/):
-              chroot/      relocated /nix/store state
-              chroot/merged bind-mounted as /nix inside sandbox
-              overlay/     overlayfs upper/work state when used
+              chroot/          relocated /nix/store state
+              chroot/merged    bind-mounted as /nix inside sandbox
+              overlay/         overlayfs upper/work state when used
 
-            First run will: initdb, start postgres on unix socket, create
-            'ironclaw' DB + load pgvector, then exec ironclaw. Run
-            \`ironclaw onboard\` inside the sandbox to configure account.
+            External/sidecar DB env delivery:
+              \$PERSIST_DIR/state/ironclaw-db.env (0600, host private)
+              -> mounted read-only at $DB_ENV_FILE_SANDBOX inside sandbox.
             EOF
+            }
+
+            append_forward_env_name() {
+              local _name="$1"
+              [[ -n "$_name" ]] || return 0
+              if [[ -z "''${OCSB_FORWARD_ENV:-}" ]]; then
+                OCSB_FORWARD_ENV="$_name"
+              elif [[ ",''${OCSB_FORWARD_ENV}," != *",$_name,"* ]]; then
+                OCSB_FORWARD_ENV="''${OCSB_FORWARD_ENV},$_name"
+              fi
+            }
+
+            remove_forward_env_name() {
+              local _name="$1"
+              local _raw="''${OCSB_FORWARD_ENV:-}"
+              [[ -n "$_raw" ]] || return 0
+
+              local _entry _trimmed
+              local _new_entries=()
+              IFS=',' read -r -a _entries <<< "$_raw"
+              for _entry in "''${_entries[@]}"; do
+                _trimmed="''${_entry#"''${_entry%%[![:space:]]*}"}"
+                _trimmed="''${_trimmed%"''${_trimmed##*[![:space:]]}"}"
+                [[ -n "$_trimmed" ]] || continue
+                if [[ "$_trimmed" != "$_name" ]]; then
+                  _new_entries+=("$_trimmed")
+                fi
+              done
+
+              if [[ ''${#_new_entries[@]} -eq 0 ]]; then
+                unset OCSB_FORWARD_ENV
+              else
+                OCSB_FORWARD_ENV="$(IFS=,; printf '%s' "''${_new_entries[*]}")"
+              fi
+            }
+
+            is_db_env_name() {
+              case "$1" in
+                DATABASE_URL|DATABASE_BACKEND|DATABASE_SSLMODE|DATABASE_POOL_SIZE|PGHOST|PGPORT|PGUSER|PGPASSWORD|PGDATABASE)
+                  return 0
+                  ;;
+                *)
+                  return 1
+                  ;;
+              esac
+            }
+
+            write_db_env_file() {
+              local _db_env_file="$1"
+              local _db_env_name
+
+              (
+                umask 077
+                {
+                  for _db_env_name in DATABASE_URL DATABASE_BACKEND DATABASE_SSLMODE DATABASE_POOL_SIZE PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE; do
+                    if [[ -n "''${!_db_env_name+x}" ]]; then
+                      printf 'export %s=%q\n' "$_db_env_name" "''${!_db_env_name}"
+                    fi
+                  done
+                } > "$_db_env_file"
+              )
+              chmod 0600 "$_db_env_file" 2>/dev/null || true
             }
 
             while [[ $# -gt 0 ]]; do
@@ -143,6 +248,59 @@
                   PERSIST_DIR="$2"
                   shift 2
                   ;;
+                --db-mode)
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
+                  DB_MODE="$2"
+                  shift 2
+                  ;;
+                --db-sidecar-runtime)
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
+                  DB_SIDECAR_RUNTIME="$2"
+                  shift 2
+                  ;;
+                --db-sidecar-container)
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
+                  DB_SIDECAR_CONTAINER="$2"
+                  shift 2
+                  ;;
+                --db-sidecar-image)
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
+                  DB_SIDECAR_IMAGE="$2"
+                  shift 2
+                  ;;
+                --db-sidecar-port)
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires a value" >&2; exit 1; }
+                  DB_SIDECAR_PORT="$2"
+                  shift 2
+                  ;;
+                --env)
+                  [[ $# -ge 2 ]] || { echo "ocsb-$VARIANT: $1 requires NAME or NAME=VALUE" >&2; exit 1; }
+                  _ENV_SPEC="$2"
+                  if [[ "$_ENV_SPEC" == *=* ]]; then
+                    _ENV_NAME="''${_ENV_SPEC%%=*}"
+                    _ENV_VALUE="''${_ENV_SPEC#*=}"
+                  else
+                    _ENV_NAME="$_ENV_SPEC"
+                    if [[ ! "$_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                      echo "ocsb-$VARIANT: invalid --env name: $_ENV_NAME" >&2
+                      exit 1
+                    fi
+                    if [[ -z "''${!_ENV_NAME+x}" ]]; then
+                      echo "ocsb-$VARIANT: --env $_ENV_NAME requested but host environment variable is unset" >&2
+                      exit 1
+                    fi
+                    _ENV_VALUE="''${!_ENV_NAME}"
+                  fi
+                  if [[ ! "$_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                    echo "ocsb-$VARIANT: invalid --env name: $_ENV_NAME" >&2
+                    exit 1
+                  fi
+                  export "$_ENV_NAME=$_ENV_VALUE"
+                  if ! is_db_env_name "$_ENV_NAME"; then
+                    FILTERED_ARGS+=("$1" "$2")
+                  fi
+                  shift 2
+                  ;;
                 --)
                   FILTERED_ARGS+=("$1")
                   shift
@@ -162,8 +320,49 @@
             if [[ -z "$PERSIST_DIR" ]]; then
               if [[ -n "''${OCSB_IRONCLAW_PERSIST_DIR:-}" ]]; then
                 PERSIST_DIR="$OCSB_IRONCLAW_PERSIST_DIR"
-              else
+              elif [[ "$VARIANT" == "ironclaw" ]]; then
                 PERSIST_DIR="$HOME/.cache/ocsb/ironclaw"
+              else
+                PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT"
+              fi
+            fi
+
+            case "$DB_MODE" in
+              embedded|external|sidecar) ;;
+              *)
+                echo "ocsb-$VARIANT: invalid --db-mode '$DB_MODE' (expected embedded|external|sidecar)" >&2
+                exit 1
+                ;;
+            esac
+
+            if [[ -z "$DB_SIDECAR_CONTAINER" ]]; then
+              if [[ "$VARIANT_SAFE" == "ironclaw" ]]; then
+                DB_SIDECAR_CONTAINER="ocsb-ironclaw-db"
+              else
+                DB_SIDECAR_CONTAINER="ocsb-''${VARIANT_SAFE}-db"
+              fi
+            fi
+
+            if [[ "$DB_MODE" == "sidecar" ]]; then
+              case "$DB_SIDECAR_RUNTIME" in
+                podman|docker) ;;
+                *)
+                  echo "ocsb-$VARIANT: invalid --db-sidecar-runtime '$DB_SIDECAR_RUNTIME' (expected podman|docker)" >&2
+                  exit 1
+                  ;;
+              esac
+
+              if [[ -z "$DB_SIDECAR_CONTAINER" ]]; then
+                echo "ocsb-$VARIANT: --db-sidecar-container must not be empty" >&2
+                exit 1
+              fi
+              if [[ -z "$DB_SIDECAR_IMAGE" ]]; then
+                echo "ocsb-$VARIANT: --db-sidecar-image must not be empty" >&2
+                exit 1
+              fi
+              if [[ ! "$DB_SIDECAR_PORT" =~ ^[0-9]+$ ]] || (( DB_SIDECAR_PORT < 1 || DB_SIDECAR_PORT > 65535 )); then
+                echo "ocsb-$VARIANT: invalid --db-sidecar-port '$DB_SIDECAR_PORT' (expected 1-65535)" >&2
+                exit 1
               fi
             fi
 
@@ -178,9 +377,140 @@
             ${pkgs.coreutils}/bin/mkdir -p \
               "$PERSIST_DIR/home" \
               "$PERSIST_DIR/data" \
-              "$PERSIST_DIR/pgdata" \
-              "$PERSIST_DIR/pgrun" \
+              "$PERSIST_DIR/workspace" \
               "$PERSIST_DIR/state"
+
+            if [[ "$DB_MODE" == "embedded" ]]; then
+              ${pkgs.coreutils}/bin/mkdir -p "$PERSIST_DIR/pgdata" "$PERSIST_DIR/pgrun"
+            elif [[ "$DB_MODE" == "sidecar" ]]; then
+              ${pkgs.coreutils}/bin/mkdir -p "$PERSIST_DIR/pgdata-sidecar"
+            fi
+
+            export OCSB_IRONCLAW_DB_MODE="$DB_MODE"
+            append_forward_env_name OCSB_IRONCLAW_DB_MODE
+
+            if [[ "$DB_MODE" == "external" ]]; then
+              if [[ -z "''${DATABASE_URL:-}" ]]; then
+                echo "ocsb-$VARIANT: db mode 'external' requires DATABASE_URL in the host environment" >&2
+                exit 1
+              fi
+              export DATABASE_BACKEND="''${DATABASE_BACKEND:-postgres}"
+            elif [[ "$DB_MODE" == "sidecar" ]]; then
+              if ! command -v "$DB_SIDECAR_RUNTIME" >/dev/null 2>&1; then
+                echo "ocsb-$VARIANT: db mode 'sidecar' requires '$DB_SIDECAR_RUNTIME' on host PATH" >&2
+                exit 1
+              fi
+
+              _SIDECAR_STATUS=""
+              if _SIDECAR_STATUS="$($DB_SIDECAR_RUNTIME inspect --format '{{.State.Status}}' "$DB_SIDECAR_CONTAINER" 2>/dev/null)"; then
+                :
+              else
+                _SIDECAR_STATUS=""
+              fi
+
+              _SIDECAR_PASSWORD_FILE="$PERSIST_DIR/sidecar-db-password"
+              if [[ -s "$_SIDECAR_PASSWORD_FILE" ]]; then
+                chmod 0600 "$_SIDECAR_PASSWORD_FILE" 2>/dev/null || true
+              elif [[ -n "$_SIDECAR_STATUS" ]]; then
+                echo "ocsb-$VARIANT: sidecar container '$DB_SIDECAR_CONTAINER' already exists, but $_SIDECAR_PASSWORD_FILE is missing" >&2
+                echo "ocsb-$VARIANT: use the same --persist-dir that created it, or use --db-mode external with an explicit DATABASE_URL" >&2
+                exit 1
+              else
+                (
+                  umask 077
+                  ${pkgs.openssl}/bin/openssl rand -hex 24 > "$_SIDECAR_PASSWORD_FILE"
+                )
+                chmod 0600 "$_SIDECAR_PASSWORD_FILE" 2>/dev/null || true
+              fi
+              DB_SIDECAR_PASSWORD="$(${pkgs.coreutils}/bin/cat "$_SIDECAR_PASSWORD_FILE")"
+
+              if [[ "$_SIDECAR_STATUS" == "running" ]]; then
+                echo "ocsb-$VARIANT: reusing running sidecar container '$DB_SIDECAR_CONTAINER'" >&2
+              elif [[ -n "$_SIDECAR_STATUS" ]]; then
+                echo "ocsb-$VARIANT: starting existing sidecar container '$DB_SIDECAR_CONTAINER'" >&2
+                "$DB_SIDECAR_RUNTIME" start "$DB_SIDECAR_CONTAINER" >/dev/null
+              else
+                echo "ocsb-$VARIANT: creating sidecar container '$DB_SIDECAR_CONTAINER'" >&2
+
+                _SIDECAR_ENV_FILE="$(${pkgs.coreutils}/bin/mktemp "$PERSIST_DIR/state/sidecar-db.XXXXXX")"
+                (
+                  umask 077
+                  cat > "$_SIDECAR_ENV_FILE" <<EOF
+POSTGRES_USER=$DB_SIDECAR_USER
+POSTGRES_PASSWORD=$DB_SIDECAR_PASSWORD
+POSTGRES_DB=$DB_SIDECAR_DB
+EOF
+                )
+                chmod 0600 "$_SIDECAR_ENV_FILE" 2>/dev/null || true
+
+                if ! "$DB_SIDECAR_RUNTIME" run -d \
+                  --name "$DB_SIDECAR_CONTAINER" \
+                  --env-file "$_SIDECAR_ENV_FILE" \
+                  --volume "$PERSIST_DIR/pgdata-sidecar:/var/lib/postgresql/data" \
+                  --publish "127.0.0.1:$DB_SIDECAR_PORT:5432" \
+                  "$DB_SIDECAR_IMAGE" >/dev/null; then
+                  ${pkgs.coreutils}/bin/rm -f "$_SIDECAR_ENV_FILE"
+                  exit 1
+                fi
+                ${pkgs.coreutils}/bin/rm -f "$_SIDECAR_ENV_FILE"
+              fi
+
+              _SIDE_READY=0
+              for ((_i=0; _i<60; _i++)); do
+                if "$DB_SIDECAR_RUNTIME" exec "$DB_SIDECAR_CONTAINER" pg_isready -U "$DB_SIDECAR_USER" -d "$DB_SIDECAR_DB" >/dev/null 2>&1; then
+                  _SIDE_READY=1
+                  break
+                fi
+                ${pkgs.coreutils}/bin/sleep 1
+              done
+              if [[ "$_SIDE_READY" -ne 1 ]]; then
+                echo "ocsb-$VARIANT: sidecar postgres readiness timeout for '$DB_SIDECAR_CONTAINER'" >&2
+                exit 1
+              fi
+
+              _DB_EXISTS="$($DB_SIDECAR_RUNTIME exec "$DB_SIDECAR_CONTAINER" \
+                psql -U "$DB_SIDECAR_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_SIDECAR_DB'" \
+                2>/dev/null | ${pkgs.coreutils}/bin/tr -d '[:space:]' || true)"
+              if [[ "$_DB_EXISTS" != "1" ]]; then
+                "$DB_SIDECAR_RUNTIME" exec "$DB_SIDECAR_CONTAINER" createdb -U "$DB_SIDECAR_USER" "$DB_SIDECAR_DB" >/dev/null
+              fi
+              "$DB_SIDECAR_RUNTIME" exec "$DB_SIDECAR_CONTAINER" \
+                psql -U "$DB_SIDECAR_USER" -d "$DB_SIDECAR_DB" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null
+
+              export PGHOST="127.0.0.1"
+              export PGPORT="$DB_SIDECAR_PORT"
+              export PGUSER="$DB_SIDECAR_USER"
+              export PGDATABASE="$DB_SIDECAR_DB"
+              export PGPASSWORD="$DB_SIDECAR_PASSWORD"
+              export DATABASE_URL="postgres://$DB_SIDECAR_USER:$DB_SIDECAR_PASSWORD@127.0.0.1:$DB_SIDECAR_PORT/$DB_SIDECAR_DB?sslmode=disable"
+              export DATABASE_BACKEND="''${DATABASE_BACKEND:-postgres}"
+              export DATABASE_SSLMODE="''${DATABASE_SSLMODE:-disable}"
+            fi
+
+            if [[ "$DB_MODE" == "external" || "$DB_MODE" == "sidecar" ]]; then
+              DB_ENV_HOST_FILE="$PERSIST_DIR/state/ironclaw-db.env"
+              export OCSB_IRONCLAW_DB_ENV_FILE="$DB_ENV_FILE_SANDBOX"
+              append_forward_env_name OCSB_IRONCLAW_DB_ENV_FILE
+
+              remove_forward_env_name DATABASE_URL
+              remove_forward_env_name DATABASE_BACKEND
+              remove_forward_env_name DATABASE_SSLMODE
+              remove_forward_env_name DATABASE_POOL_SIZE
+              remove_forward_env_name PGHOST
+              remove_forward_env_name PGPORT
+              remove_forward_env_name PGUSER
+              remove_forward_env_name PGPASSWORD
+              remove_forward_env_name PGDATABASE
+
+              write_db_env_file "$DB_ENV_HOST_FILE"
+
+              # Avoid inheriting DB secrets in the host-side launcher/bwrap env.
+              unset DATABASE_URL DATABASE_BACKEND DATABASE_SSLMODE DATABASE_POOL_SIZE
+              unset PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
+            fi
+            export OCSB_FORWARD_ENV
+
+            cd "$PERSIST_DIR/workspace"
 
             if [[ "$SHELL_MODE" -eq 1 ]]; then
               export OCSB_EXEC_OVERRIDE=1
@@ -192,11 +522,23 @@
             # instead of ~/.cache/ocsb/<project-hash>/ironclaw.
             export OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"
 
-            exec ${ironclawSandboxBase}/bin/ironclaw \
+            IRONCLAW_MOUNT_ARGS=(
               --rw "$PERSIST_DIR/home:/home/sandbox" \
-              --rw "$PERSIST_DIR/data:/var/lib/ironclaw" \
-              --rw "$PERSIST_DIR/pgdata:/var/lib/postgresql/data" \
-              --rw "$PERSIST_DIR/pgrun:/run/postgresql" \
+              --rw "$PERSIST_DIR/data:/var/lib/ironclaw"
+            )
+            if [[ "$DB_MODE" == "embedded" ]]; then
+              IRONCLAW_MOUNT_ARGS+=(
+                --rw "$PERSIST_DIR/pgdata:/var/lib/postgresql/data"
+                --rw "$PERSIST_DIR/pgrun:/run/postgresql"
+              )
+            else
+              IRONCLAW_MOUNT_ARGS+=(
+                --ro "$DB_ENV_HOST_FILE:$DB_ENV_FILE_SANDBOX"
+              )
+            fi
+
+            exec ${ironclawSandboxBase}/bin/ironclaw \
+              "''${IRONCLAW_MOUNT_ARGS[@]}" \
               "''${FILTERED_ARGS[@]}"
           '';
 

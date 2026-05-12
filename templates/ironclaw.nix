@@ -19,6 +19,15 @@ in
     preExecHook = ''
       set -euo pipefail
 
+      DB_MODE="''${OCSB_IRONCLAW_DB_MODE:-embedded}"
+      case "$DB_MODE" in
+        embedded|external|sidecar) ;;
+        *)
+          echo "[ironclaw] invalid OCSB_IRONCLAW_DB_MODE: $DB_MODE (expected embedded|external|sidecar)" >&2
+          exit 1
+          ;;
+      esac
+
       mkdir -p "$HOME/.config/nix"
       cat > "$HOME/.config/nix/nix.conf" <<EOF
       experimental-features = nix-command flakes
@@ -32,32 +41,53 @@ in
       accept-flake-config = true
       EOF
 
-      PGDATA=/var/lib/postgresql/data
-      PGRUN=/run/postgresql
-      export PGDATA
-      mkdir -p "$PGRUN"
-      chmod 0700 "$PGDATA" 2>/dev/null || true
+      if [[ "$DB_MODE" == "embedded" ]]; then
+        PGDATA=/var/lib/postgresql/data
+        PGRUN=/run/postgresql
+        export PGDATA
+        export PGHOST="$PGRUN"
+        export DATABASE_URL="postgres:///ironclaw?host=/run/postgresql&sslmode=disable"
+        export DATABASE_BACKEND="postgres"
+        export DATABASE_SSLMODE="disable"
+        mkdir -p "$PGRUN"
+        chmod 0700 "$PGDATA" 2>/dev/null || true
 
-      # Use postgresql.withPackages buildEnv: pgvector is installed under
-      # PG's default share/postgresql/extension and lib paths, found via
-      # compile-time prefix. No extension_control_path needed.
-      _PG_BIN="${pgWithExt}/bin"
+        # Use postgresql.withPackages buildEnv: pgvector is installed under
+        # PG's default share/postgresql/extension and lib paths, found via
+        # compile-time prefix. No extension_control_path needed.
+        _PG_BIN="${pgWithExt}/bin"
 
-      if [ ! -f "$PGDATA/PG_VERSION" ]; then
-        echo "[ironclaw] initializing postgres cluster..."
-        "$_PG_BIN/initdb" -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)"
+        if [ ! -f "$PGDATA/PG_VERSION" ]; then
+          echo "[ironclaw] initializing postgres cluster..."
+          "$_PG_BIN/initdb" -D "$PGDATA" --auth=trust --no-locale --encoding=UTF8 -U "$(whoami)"
+        fi
+
+        "$_PG_BIN/pg_ctl" -D "$PGDATA" -l "$HOME/postgres.log" -w \
+          -o "-k $PGRUN -h ''' -c listen_addresses='''" \
+          start
+
+        trap '"$_PG_BIN/pg_ctl" -D "$PGDATA" -m fast stop || true' EXIT
+
+        if ! "$_PG_BIN/psql" -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
+          "$_PG_BIN/createdb" -h "$PGRUN" ironclaw
+        fi
+        "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+      else
+        DB_ENV_FILE="''${OCSB_IRONCLAW_DB_ENV_FILE:-/tmp/ocsb-ironclaw-db.env}"
+        if [[ ! -r "$DB_ENV_FILE" ]]; then
+          echo "[ironclaw] db mode '$DB_MODE' requires readable db env file: $DB_ENV_FILE" >&2
+          exit 1
+        fi
+        # Host wrapper writes shell-safe `export KEY=%q` lines to this private
+        # file (0600 host-side, mounted read-only) to avoid exposing DB secrets
+        # through bwrap --setenv argv.
+        source "$DB_ENV_FILE"
+        if [[ -z "''${DATABASE_URL:-}" ]]; then
+          echo "[ironclaw] db mode '$DB_MODE' requires DATABASE_URL" >&2
+          exit 1
+        fi
+        export DATABASE_BACKEND="''${DATABASE_BACKEND:-postgres}"
       fi
-
-      "$_PG_BIN/pg_ctl" -D "$PGDATA" -l "$HOME/postgres.log" -w \
-        -o "-k $PGRUN -h ''' -c listen_addresses='''" \
-        start
-
-      trap '"$_PG_BIN/pg_ctl" -D "$PGDATA" -m fast stop || true' EXIT
-
-      if ! "$_PG_BIN/psql" -h "$PGRUN" -lqt | cut -d \| -f 1 | grep -qw ironclaw; then
-        "$_PG_BIN/createdb" -h "$PGRUN" ironclaw
-      fi
-      "$_PG_BIN/psql" -h "$PGRUN" -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       mkdir -p /var/lib/ironclaw
       export IRONCLAW_DATA_DIR=/var/lib/ironclaw
@@ -104,9 +134,8 @@ in
 
   workspace = {
     # App persistence lives under wrapper-managed mounts.rw (home, data,
-    # pgdata, etc). ocsb's own chroot/overlay state is redirected by the
-    # wrapper via OCSB_STATE_BASE_DIR so it is stable across launch cwd.
-    # cwd is irrelevant to ironclaw, so skip CoW snapshot overhead and bind cwd directly.
+    # pgdata, etc). The wrapper launches ocsb from $PERSIST_DIR/workspace so
+    # /workspace is stable and independent of the caller's cwd.
     strategy = "direct";
     baseDir = ".ocsb";
     name = "ironclaw";
@@ -123,9 +152,5 @@ in
   env = {
     LANG = "C.UTF-8";
     EDITOR = "cat";
-    PGHOST = "/run/postgresql";
-    DATABASE_URL = "postgres:///ironclaw?host=/run/postgresql&sslmode=disable";
-    DATABASE_BACKEND = "postgres";
-    DATABASE_SSLMODE = "disable";
   };
 }
