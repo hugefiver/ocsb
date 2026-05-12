@@ -44,6 +44,7 @@ let
       [ sandboxBin pkgs.bubblewrap pkgs.cacert ]
       ++ lib.optional (cfg.app.package != null) cfg.app.package
       ++ lib.optional (preExecScript != null) preExecScript
+      ++ lib.optional (preExecScript == null) envCaptureScript
       ++ lib.optional (networkMode == "filtered" && !dualLayerEnabled) networkSetupScript
       ++ lib.optional dualLayerEnabled sandboxShell
       ;
@@ -83,14 +84,32 @@ let
     then "${cfg.app.package}/bin:/usr/bin"
     else "/usr/bin";
 
+  attachEnvPath = "/tmp/ocsb-attach.env";
+
+  captureAttachEnv = ''
+      _OCSB_ATTACH_ENV=${lib.escapeShellArg attachEnvPath}
+      (
+        umask 077
+        export -p > "$_OCSB_ATTACH_ENV.tmp"
+        ${pkgs.coreutils}/bin/mv -f "$_OCSB_ATTACH_ENV.tmp" "$_OCSB_ATTACH_ENV"
+      ) 2>/dev/null || true
+  '';
+
   preExecScript =
     if cfg.app.preExecHook != ""
     then pkgs.writeShellScript "${cfg.app.name}-pre-exec" ''
       set -euo pipefail
       ${cfg.app.preExecHook}
+      ${captureAttachEnv}
       exec "$@"
     ''
     else null;
+
+  envCaptureScript = pkgs.writeShellScript "${cfg.app.name}-env-capture" ''
+    set -euo pipefail
+    ${captureAttachEnv}
+    exec "$@"
+  '';
 
   # --- Network mode ---
   # null → host network, true → filtered (slirp4netns + iptables), false → no network
@@ -243,6 +262,117 @@ let
   launcher = pkgs.writeShellScript "${cfg.app.name}-launcher" ''
     set -euo pipefail
 
+    proc_comm() {
+      local _pid="$1"
+      [[ "$_pid" =~ ^[0-9]+$ ]] || return 0
+      [[ -r "/proc/$_pid/comm" ]] || return 0
+      local _comm
+      IFS= read -r _comm < "/proc/$_pid/comm" || return 0
+      printf '%s\n' "$_comm"
+    }
+
+    proc_ppid() {
+      local _pid="$1"
+      [[ "$_pid" =~ ^[0-9]+$ ]] || return 0
+      [[ -r "/proc/$_pid/status" ]] || return 0
+      local _line _ppid
+      while IFS= read -r _line; do
+        case "$_line" in
+          PPid:*)
+            _ppid="''${_line#PPid:}"
+            _ppid="''${_ppid//[[:space:]]/}"
+            printf '%s\n' "$_ppid"
+            return 0
+            ;;
+        esac
+      done < "/proc/$_pid/status"
+    }
+
+    proc_start_time() {
+      local _pid="$1"
+      [[ "$_pid" =~ ^[0-9]+$ ]] || return 0
+      [[ -r "/proc/$_pid/stat" ]] || return 0
+      local _stat _rest _field _idx
+      IFS= read -r _stat < "/proc/$_pid/stat" || return 0
+      _rest="''${_stat##*) }"
+      _idx=1
+      for _field in $_rest; do
+        if [[ $_idx -eq 20 ]]; then
+          printf '%s\n' "$_field"
+          return 0
+        fi
+        _idx=$((_idx + 1))
+      done
+    }
+
+    resolve_attach_init_pid() {
+      _ATTACH_STALE=0
+      _ATTACH_ERROR=""
+      _RESOLVED_INIT_PID=""
+      local _candidate_pid="$1"
+      local _expected_start="''${2:-}"
+      [[ "$_candidate_pid" =~ ^[0-9]+$ ]] || {
+        _ATTACH_ERROR="ocsb: invalid attach PID: $_candidate_pid"
+        _ATTACH_STALE=1
+        return 1
+      }
+      if ! kill -0 "$_candidate_pid" 2>/dev/null; then
+        _ATTACH_ERROR="ocsb: no live process at PID $_candidate_pid (stale pidfile?)"
+        _ATTACH_STALE=1
+        return 1
+      fi
+
+      local _candidate_comm
+      _candidate_comm="$(proc_comm "$_candidate_pid")"
+      if [[ "$_candidate_comm" != "bwrap" ]]; then
+        _ATTACH_ERROR="ocsb: attach PID $_candidate_pid is not a bwrap process yet (comm=''${_candidate_comm:-unknown})"
+        return 1
+      fi
+
+      if [[ -n "$_expected_start" ]]; then
+        local _actual_start
+        _actual_start="$(proc_start_time "$_candidate_pid")"
+        if [[ -z "$_actual_start" || "$_actual_start" != "$_expected_start" ]]; then
+          _ATTACH_ERROR="ocsb: attach PID $_candidate_pid start time changed (stale pidfile?)"
+          _ATTACH_STALE=1
+          return 1
+        fi
+      fi
+
+      # Accept --attach=<pid> for either the outer bwrap process or the
+      # sandbox-init bwrap child. The latter is common when users inspect
+      # the process tree manually and copy the namespace-holding PID.
+      local _parent_pid _parent_comm
+      _parent_pid="$(proc_ppid "$_candidate_pid")"
+      if [[ -n "$_parent_pid" ]]; then
+        _parent_comm="$(proc_comm "$_parent_pid")"
+        if [[ "$_parent_comm" == "bwrap" ]]; then
+          _RESOLVED_INIT_PID="$_candidate_pid"
+          return 0
+        fi
+      fi
+
+      local _child_pid _child_comm
+      local -a _child_candidates=()
+      local -a _init_candidates=()
+      mapfile -t _child_candidates < <(${pkgs.procps}/bin/pgrep -P "$_candidate_pid" -x bwrap || true)
+      for _child_pid in "''${_child_candidates[@]}"; do
+        _child_comm="$(proc_comm "$_child_pid")"
+        [[ "$_child_comm" == "bwrap" ]] && _init_candidates+=("$_child_pid")
+      done
+
+      if [[ ''${#_init_candidates[@]} -eq 1 ]]; then
+        _RESOLVED_INIT_PID="''${_init_candidates[0]}"
+        return 0
+      fi
+      if [[ ''${#_init_candidates[@]} -eq 0 ]]; then
+        _ATTACH_ERROR="ocsb: bwrap PID $_candidate_pid has no sandbox-init child to attach to"
+      else
+        _ATTACH_ERROR="ocsb: bwrap PID $_candidate_pid has multiple sandbox-init children: ''${_init_candidates[*]}"
+      fi
+      return 1
+    }
+
     maybe_attach() {
     # =========================================================
     # --attach: enter namespaces of the currently-running sandbox
@@ -262,66 +392,84 @@ let
     if [[ -n "$_ATTACH_TARGET" ]]; then
       _PIDFILE="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/${cfg.app.name}.pid"
       _BWRAP_PID=""
+      _BWRAP_START=""
       if [[ "$_ATTACH_TARGET" == "auto" ]]; then
         if [[ ! -e "$_PIDFILE" ]]; then
           echo "ocsb: no running ${cfg.app.name} instance (pidfile $_PIDFILE missing)" >&2
           echo "ocsb: launch the sandbox first, or pass --attach=<bwrap-pid>" >&2
           exit 1
         fi
-        _BWRAP_PID=$(${pkgs.coreutils}/bin/cat "$_PIDFILE")
+        read -r _BWRAP_PID _BWRAP_START < "$_PIDFILE" || true
       else
         _BWRAP_PID="$_ATTACH_TARGET"
-      fi
-      if ! kill -0 "$_BWRAP_PID" 2>/dev/null; then
-        echo "ocsb: no live process at PID $_BWRAP_PID (stale pidfile?)" >&2
-        [[ -e "$_PIDFILE" ]] && ${pkgs.coreutils}/bin/rm -f "$_PIDFILE"
-        exit 1
       fi
       # bwrap forks the sandbox-init child (also named "bwrap"), which
       # holds the user/mount/pid/etc namespaces we want to enter.
       # In filtered-network mode, slirp4netns is ALSO a child of bwrap
       # (reparented when launcher exec'd into bwrap), but it lives in
-      # host namespaces — entering its namespaces would EINVAL. Filter
-      # by comm=bwrap to pick the sandbox init reliably.
-      _INIT_PID=$(${pkgs.procps}/bin/pgrep -P "$_BWRAP_PID" -x bwrap | ${pkgs.coreutils}/bin/head -n1 || true)
+      # host namespaces — entering its namespaces would EINVAL.
+      _INIT_PID=""
+      _ATTACH_TRIES=0
+      while [[ $_ATTACH_TRIES -lt 20 ]]; do
+        if resolve_attach_init_pid "$_BWRAP_PID" "$_BWRAP_START"; then
+          _INIT_PID="$_RESOLVED_INIT_PID"
+          break
+        fi
+        [[ "''${_ATTACH_STALE:-0}" -eq 1 ]] && break
+        _ATTACH_TRIES=$((_ATTACH_TRIES + 1))
+        ${pkgs.coreutils}/bin/sleep 0.1
+      done
       if [[ -z "$_INIT_PID" ]]; then
-        echo "ocsb: bwrap PID $_BWRAP_PID has no sandbox-init child to attach to" >&2
+        echo "''${_ATTACH_ERROR:-ocsb: unable to resolve sandbox-init bwrap process}" >&2
+        [[ "$_ATTACH_TARGET" == "auto" && "''${_ATTACH_STALE:-0}" -eq 1 && -e "$_PIDFILE" ]] && ${pkgs.coreutils}/bin/rm -f "$_PIDFILE"
         exit 1
       fi
-      # Inner shell: inherit sandbox PID 1's env (preExecHook exports
-      # like SECRETS_MASTER_KEY, DATABASE_URL, PATH, etc.), cd into
-      # workspace, then drop into interactive bash.
-      _INNER_SCRIPT='while IFS= read -r -d "" _line; do
+      # Inner shell: prefer the payload environment captured inside the sandbox
+      # (after bwrap --setenv and preExecHook). Fall back to PID 1 env only for
+      # older running instances that predate /tmp/ocsb-attach.env.
+      _INNER_SCRIPT='if [[ -r ${attachEnvPath} ]]; then
+  source ${attachEnvPath} 2>/dev/null || true
+else
+  while IFS= read -r -d "" _line; do
   _k="''${_line%%=*}"
   _v="''${_line#*=}"
   [[ -n "$_k" && "$_k" != "_" ]] && export "$_k=$_v" 2>/dev/null || true
-done < /proc/1/environ
+  done < /proc/1/environ
+fi
 cd /workspace 2>/dev/null || cd /home/sandbox 2>/dev/null || cd /
 exec ${pkgs.bashInteractive}/bin/bash -i'
       _NSENTER_ARGS=(
         -t "$_INIT_PID"
         -U --preserve-credentials
         -m -p -i -u
-        -r --wd=/
+        -r --wdns=/
         ${lib.optionalString (networkMode != "host" && !dualLayerEnabled) ''-n''}
       )
       exec ${pkgs.util-linux}/bin/nsenter \
         "''${_NSENTER_ARGS[@]}" \
-        -- ${pkgs.bashInteractive}/bin/bash -c "$_INNER_SCRIPT"
+        -- ${pkgs.coreutils}/bin/env -i \
+          HOME=/home/sandbox \
+          PATH=/usr/bin \
+          TERM="''${TERM:-xterm-256color}" \
+          ${pkgs.bashInteractive}/bin/bash -c "$_INNER_SCRIPT"
     fi
+    }
+
+    record_attach_pidfile() {
+      local _pidfile_dir="''${XDG_RUNTIME_DIR:-/tmp}/ocsb"
+      ${pkgs.coreutils}/bin/mkdir -p "$_pidfile_dir"
+      local _pid_start
+      _pid_start="$(proc_start_time "$$")"
+      if [[ -n "$_pid_start" ]]; then
+        printf '%s %s\n' "$$" "$_pid_start" > "$_pidfile_dir/${cfg.app.name}.pid"
+      else
+        echo $$ > "$_pidfile_dir/${cfg.app.name}.pid"
+      fi
     }
 
     BACKEND_TYPE=${lib.escapeShellArg defaultBackend}
 
     maybe_attach "$@"
-
-    # Record this launcher pid so future --attach can find us.
-    # After `exec bwrap` further down the script, this pid IS the
-    # bwrap pid (exec preserves pid). Stale entries are tolerated:
-    # readers validate with `kill -0` and clean them up.
-    _PIDFILE_DIR="''${XDG_RUNTIME_DIR:-/tmp}/ocsb"
-    ${pkgs.coreutils}/bin/mkdir -p "$_PIDFILE_DIR"
-    echo $$ > "$_PIDFILE_DIR/${cfg.app.name}.pid"
 
     # =========================================================
     # Helper: resolve ~ in paths at runtime
@@ -696,8 +844,10 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       ''}
       fi
 
-      ${lib.optionalString (preExecScript != null) ''
+      ${if preExecScript != null then ''
       SANDBOX_CMD=(${preExecScript} "''${SANDBOX_CMD[@]}")
+      '' else ''
+      SANDBOX_CMD=(${envCaptureScript} "''${SANDBOX_CMD[@]}")
       ''}
     }
 
@@ -983,6 +1133,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       ) &
       _SLIRP_PID=$!
 
+      record_attach_pidfile
       exec ${pkgs.bubblewrap}/bin/bwrap \
         "''${BWRAP_ARGS[@]}" \
         --info-fd 3 \
@@ -990,6 +1141,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         3>"$_NET_TMP/info"
       '' else ''
       # Simple exec: host network or no network
+      record_attach_pidfile
       exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
       ''}
     }

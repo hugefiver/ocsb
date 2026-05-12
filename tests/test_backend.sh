@@ -106,7 +106,20 @@ PODMAN_TEXT="$(read_launcher_text "$PODMAN_BIN")"
 assert_contains "podman launcher records backend" "$PODMAN_TEXT" "BACKEND_TYPE=podman"
 assert_contains "podman launcher has podman exec path" "$PODMAN_TEXT" "exec podman"
 assert_contains "podman launcher uses keep-id" "$PODMAN_TEXT" "--userns=keep-id"
-assert_contains "attach resets root into sandbox filesystem" "$PODMAN_TEXT" "-r --wd=/"
+assert_contains "attach resets root into sandbox filesystem" "$PODMAN_TEXT" "-r --wdns=/"
+assert_contains "attach pidfile records proc start time" "$PODMAN_TEXT" '_pid_start="$(proc_start_time "$$")"'
+assert_contains "attach pidfile accepts legacy one-field format" "$PODMAN_TEXT" 'read -r _BWRAP_PID _BWRAP_START < "$_PIDFILE"'
+assert_contains "attach validates bwrap comm" "$PODMAN_TEXT" 'proc_comm "$_candidate_pid"'
+assert_contains "attach accepts sandbox init bwrap pid" "$PODMAN_TEXT" 'if [[ "$_parent_comm" == "bwrap" ]]; then'
+assert_contains "attach rejects ambiguous init children" "$PODMAN_TEXT" "has multiple sandbox-init children"
+assert_contains "attach records pidfile before filtered bwrap exec" "$PODMAN_TEXT" $'record_attach_pidfile\n      exec ${pkgs.bubblewrap}/bin/bwrap \\'
+assert_contains "attach records pidfile before simple bwrap exec" "$PODMAN_TEXT" 'record_attach_pidfile
+      exec ${pkgs.bubblewrap}/bin/bwrap "'
+assert_contains "attach keeps pidfile while sandbox is still starting" "$PODMAN_TEXT" '_ATTACH_STALE=1'
+assert_contains "attach retries while bwrap child starts" "$PODMAN_TEXT" 'while [[ $_ATTACH_TRIES -lt 20 ]]; do'
+assert_contains "attach wraps payload with env capture" "$PODMAN_TEXT" "env-capture"
+assert_contains "attach shell sources captured environment" "$PODMAN_TEXT" 'source /tmp/ocsb-attach.env'
+assert_contains "attach starts shell with clean host env" "$PODMAN_TEXT" "env -i"
 
 NSPAWN_OUT="$(build_backend test-nspawn-backend systemd-nspawn 2>&1)" || {
   echo "$NSPAWN_OUT" >&2
