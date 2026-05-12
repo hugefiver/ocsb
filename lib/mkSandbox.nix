@@ -302,6 +302,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         -t "$_INIT_PID"
         -U --preserve-credentials
         -m -p -i -u
+        -r --wd=/
         ${lib.optionalString (networkMode != "host" && !dualLayerEnabled) ''-n''}
       )
       exec ${pkgs.util-linux}/bin/nsenter \
@@ -603,6 +604,48 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       ''}
     }
 
+    trim_ascii_whitespace() {
+      local _v="$1"
+      _v="''${_v#"''${_v%%[![:space:]]*}"}"
+      _v="''${_v%"''${_v##*[![:space:]]}"}"
+      printf '%s' "$_v"
+    }
+
+    append_forwarded_host_env_args() {
+      local _forward_raw="''${OCSB_FORWARD_ENV:-}"
+      [[ -n "$_forward_raw" ]] || return 0
+
+      local _entry _name
+      local -A _forward_seen=()
+      IFS=',' read -r -a _forward_entries <<< "$_forward_raw"
+      for _entry in "''${_forward_entries[@]}"; do
+        _name="$(trim_ascii_whitespace "$_entry")"
+        [[ -n "$_name" ]] || continue
+
+        if [[ ! "$_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          echo "ocsb: warning: skipping invalid OCSB_FORWARD_ENV entry: $_name" >&2
+          continue
+        fi
+
+        if [[ -n "''${_forward_seen[$_name]:-}" ]]; then
+          continue
+        fi
+        _forward_seen[$_name]=1
+
+        if [[ -n "''${!_name+x}" ]]; then
+          BWRAP_ARGS+=(--setenv "$_name" "''${!_name}")
+        fi
+      done
+    }
+
+    append_runtime_env_args() {
+      local _idx=0
+      while [[ $_idx -lt ''${#RUNTIME_ENV_NAMES[@]} ]]; do
+        BWRAP_ARGS+=(--setenv "''${RUNTIME_ENV_NAMES[$_idx]}" "''${RUNTIME_ENV_VALUES[$_idx]}")
+        _idx=$((_idx + 1))
+      done
+    }
+
     append_environment_args() {
       BWRAP_ARGS+=(
         --setenv HOME /home/sandbox
@@ -620,6 +663,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         ${lib.optionalString dualLayerEnabled ''--setenv OCSB_DUAL_LAYER outer''}
       )
       ${envSetenvEntries}
+      append_forwarded_host_env_args
+      append_runtime_env_args
       ${lib.optionalString (cfg.experimental.nixStoreMode == "host-daemon") ''
       # Force clients to use the host daemon even if a template/user env tried
       # to select local/single-user Nix state.
@@ -958,6 +1003,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     CONTINUE=0
     OVERWRITE=0
     RUNTIME_MOUNTS=()
+    RUNTIME_ENV_NAMES=()
+    RUNTIME_ENV_VALUES=()
     OVERLAY_MOUNTS=()
     SNAP_MOUNTS=()
 
@@ -979,6 +1026,31 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             bubblewrap|podman|systemd-nspawn) BACKEND_TYPE="$2" ;;
             *) echo "ocsb: unknown backend: $2" >&2; exit 1 ;;
           esac
+          shift 2 ;;
+        --env)
+          [[ $# -ge 2 ]] || { echo "ocsb: $1 requires NAME or NAME=VALUE" >&2; exit 1; }
+          _ENV_SPEC="$2"
+          if [[ "$_ENV_SPEC" == *=* ]]; then
+            _ENV_NAME="''${_ENV_SPEC%%=*}"
+            _ENV_VALUE="''${_ENV_SPEC#*=}"
+          else
+            _ENV_NAME="$_ENV_SPEC"
+            if [[ ! "$_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "ocsb: invalid --env name: $_ENV_NAME" >&2
+              exit 1
+            fi
+            if [[ -z "''${!_ENV_NAME+x}" ]]; then
+              echo "ocsb: --env $_ENV_NAME requested but host environment variable is unset" >&2
+              exit 1
+            fi
+            _ENV_VALUE="''${!_ENV_NAME}"
+          fi
+          if [[ ! "$_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "ocsb: invalid --env name: $_ENV_NAME" >&2
+            exit 1
+          fi
+          RUNTIME_ENV_NAMES+=("$_ENV_NAME")
+          RUNTIME_ENV_VALUES+=("$_ENV_VALUE")
           shift 2 ;;
         --ro|--rw)
           [[ $# -ge 2 ]] || { echo "ocsb: $1 requires HOST_PATH:SANDBOX_PATH" >&2; exit 1; }

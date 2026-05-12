@@ -399,6 +399,42 @@ assert_fails "overlay-mount rejects nonexistent host path" \
 rm -rf "$OVL_SRC"
 echo ""
 
+# --- OCSB_FORWARD_ENV host env forwarding ---
+echo "--- OCSB_FORWARD_ENV forwarding ---"
+
+FORWARD_ONE_VAL="forward-one-$$"
+FORWARD_TWO_VAL="forward-two-$$ with spaces"
+FORWARD_OUTPUT=$(OCSB_FORWARD_ENV="FORWARD_ONE, FORWARD_TWO, UNSET_FORWARD, BAD-NAME,FORWARD_ONE" \
+  FORWARD_ONE="$FORWARD_ONE_VAL" FORWARD_TWO="$FORWARD_TWO_VAL" \
+  "$OCSB_BIN" -w "test-forward-env" --strategy direct --overwrite -- \
+  -c 'printf "%s\n%s\n%s\n" "${FORWARD_ONE:-MISSING}" "${FORWARD_TWO:-MISSING}" "${UNSET_FORWARD:-UNSET}"')
+
+FORWARD_LINE1=$(printf '%s\n' "$FORWARD_OUTPUT" | sed -n '1p')
+FORWARD_LINE2=$(printf '%s\n' "$FORWARD_OUTPUT" | sed -n '2p')
+FORWARD_LINE3=$(printf '%s\n' "$FORWARD_OUTPUT" | sed -n '3p')
+
+assert "OCSB_FORWARD_ENV forwards first host var" [ "$FORWARD_LINE1" = "$FORWARD_ONE_VAL" ]
+assert "OCSB_FORWARD_ENV forwards second host var" [ "$FORWARD_LINE2" = "$FORWARD_TWO_VAL" ]
+assert "OCSB_FORWARD_ENV skips unset vars" [ "$FORWARD_LINE3" = "UNSET" ]
+
+CLI_ENV_ONE_VAL="cli-env-one-$$"
+CLI_ENV_TWO_VAL="cli env two $$"
+CLI_ENV_OUTPUT=$(CLI_ENV_TWO="$CLI_ENV_TWO_VAL" \
+  "$OCSB_BIN" -w "test-cli-env" --strategy direct --overwrite \
+  --env "CLI_ENV_ONE=$CLI_ENV_ONE_VAL" --env CLI_ENV_TWO -- \
+  -c 'printf "%s\n%s\n" "${CLI_ENV_ONE:-MISSING}" "${CLI_ENV_TWO:-MISSING}"')
+CLI_ENV_LINE1=$(printf '%s\n' "$CLI_ENV_OUTPUT" | sed -n '1p')
+CLI_ENV_LINE2=$(printf '%s\n' "$CLI_ENV_OUTPUT" | sed -n '2p')
+
+assert "--env NAME=VALUE passes explicit value" [ "$CLI_ENV_LINE1" = "$CLI_ENV_ONE_VAL" ]
+assert "--env NAME forwards host value" [ "$CLI_ENV_LINE2" = "$CLI_ENV_TWO_VAL" ]
+assert_fails "--env rejects invalid names" \
+  "$OCSB_BIN" -w "test-cli-env-bad" --strategy direct --overwrite --env "BAD-NAME=value" -- -c true
+assert_fails "--env NAME rejects unset host variable" \
+  "$OCSB_BIN" -w "test-cli-env-unset" --strategy direct --overwrite --env "UNSET_CLI_ENV_$$" -- -c true
+
+echo ""
+
 # --- OCSB_NETWORK env var ---
 echo "--- OCSB_NETWORK env var ---"
 

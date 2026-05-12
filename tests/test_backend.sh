@@ -106,6 +106,7 @@ PODMAN_TEXT="$(read_launcher_text "$PODMAN_BIN")"
 assert_contains "podman launcher records backend" "$PODMAN_TEXT" "BACKEND_TYPE=podman"
 assert_contains "podman launcher has podman exec path" "$PODMAN_TEXT" "exec podman"
 assert_contains "podman launcher uses keep-id" "$PODMAN_TEXT" "--userns=keep-id"
+assert_contains "attach resets root into sandbox filesystem" "$PODMAN_TEXT" "-r --wd=/"
 
 NSPAWN_OUT="$(build_backend test-nspawn-backend systemd-nspawn 2>&1)" || {
   echo "$NSPAWN_OUT" >&2
