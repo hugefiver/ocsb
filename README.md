@@ -14,11 +14,11 @@
 | 命令 | 说明 |
 |---|---|
 | `nix run github:hugefiver/ocsb` | 默认：交互 bash + opencode 配置 |
-| `nix run github:hugefiver/ocsb#ironclaw-sandbox` | Ironclaw 最新版（v0.27.0），自带 postgres18 + pgvector |
-| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_26_0` | Ironclaw v0.26.0 |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox` | Ironclaw 最新版（v0.28.1），自带 postgres18 + pgvector |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_27_0` | Ironclaw v0.27.0 |
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox_x86_64_v3` | Ironclaw 最新版，x86-64-v3 优化（Haswell+） |
 
-每个版本同时提供 `_x86_64_v3` 后缀的微架构变体（如 `ironclaw-sandbox_v0_26_0_x86_64_v3`），针对 2013+ Intel/AMD CPU 编译。无后缀变体使用 baseline x86-64-v1。
+每个版本同时提供 `_x86_64_v3` 后缀的微架构变体（如 `ironclaw-sandbox_v0_27_0_x86_64_v3`），针对 2013+ Intel/AMD CPU 编译。无后缀变体使用 baseline x86-64-v1。
 
 构建产物在 `./result/bin/`。
 

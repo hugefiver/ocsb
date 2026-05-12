@@ -6,22 +6,22 @@
 
     # Track ironclaw releases. The "latest" alias (`ironclaw-src`) points at the
     # newest tag we ship; older releases are pinned independently and remain
-    # buildable as `ironclaw_v0_26_0`, etc. To bump:
+    # buildable as `ironclaw_v0_27_0`, etc. To bump:
     #   1. Move `ironclaw-src` to the new release tag.
-    #   2. Add the previous tag here (e.g. ironclaw-src-v0_26_0) and register it
+    #   2. Add the previous tag here (e.g. ironclaw-src-v0_27_0) and register it
     #      in `ironclawVersions` below.
     #   3. Drop the oldest entry if the kept-window grows beyond 2 releases.
     ironclaw-src = {
-      url = "github:nearai/ironclaw/ironclaw-v0.27.0";
+      url = "github:nearai/ironclaw/ironclaw-v0.28.1";
       flake = false;
     };
-    ironclaw-src-v0_26_0 = {
-      url = "github:nearai/ironclaw/15b1f14149511ef5d256cc9aab15651fd3de0bdb";
+    ironclaw-src-v0_27_0 = {
+      url = "github:nearai/ironclaw/93c7d6a484237999a7a202efd6d54f70d785c0b7";
       flake = false;
     };
   };
 
-  outputs = inputs@{ self, nixpkgs, ironclaw-src, ironclaw-src-v0_26_0, ... }:
+  outputs = inputs@{ self, nixpkgs, ironclaw-src, ironclaw-src-v0_27_0, ... }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
@@ -32,8 +32,8 @@
       # Latest first. The first entry's package becomes the unversioned
       # `ironclaw` / `ironclaw-sandbox` aliases.
       ironclawVersions = [
-        { slug = "v0_27_0"; version = "0.27.0"; src = ironclaw-src; }
-        { slug = "v0_26_0"; version = "0.26.0"; src = ironclaw-src-v0_26_0; }
+        { slug = "v0_28_1"; version = "0.28.1"; src = ironclaw-src; }
+        { slug = "v0_27_0"; version = "0.27.0"; src = ironclaw-src-v0_27_0; }
       ];
 
       # Micro-architecture variants. The first entry is the unsuffixed default
@@ -67,7 +67,7 @@
 
           # `slug` is empty for the latest alias (-> `ocsb-ironclaw`,
           # persist dir `~/.cache/ocsb/ironclaw/`). For non-latest builds
-          # `slug` becomes "_v0_26_0" so wrappers and persist dirs are
+          # `slug` becomes "_v0_27_0" so wrappers and persist dirs are
           # distinct per version.
           mkSandboxBin = { slug, ironclawSandboxBase }: pkgs.writeShellScriptBin "ocsb-ironclaw${slug}" ''
             set -euo pipefail
