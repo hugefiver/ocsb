@@ -50,9 +50,15 @@
 ./result/bin/ocsb --overlay-mount /data/models:/workspace/models
 ./result/bin/ocsb --snap-mount /data/datasets:/workspace/datasets   # 源需为 btrfs subvol
 
+# 传入环境变量
+./result/bin/ocsb --env FOO=bar -- env
+TOKEN=... ./result/bin/ocsb --env TOKEN -- env
+
 # 直接跑命令
 ./result/bin/ocsb -- echo hi
 ```
+
+通用 `--env` 会通过 sandbox launcher 注入变量，适合普通配置值；高敏感 secret 需要注意本机进程可见性。Ironclaw 的 `external`/`sidecar` DB secret 走专用 0600 env 文件，不走 generic `--env` 下传路径。
 
 ## Workspace 策略
 
@@ -136,13 +142,52 @@ v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、
 
 每个版本独立 flake input + 独立持久化目录。
 
-**持久化路径**（首次启动自动初始化 postgres + pgvector，在沙箱内 unix socket 上跑）：
+**持久化路径**（默认 embedded 模式会首次启动自动初始化 postgres + pgvector，在沙箱内 unix socket 上跑）：
 - 最新版：`~/.cache/ocsb/ironclaw/`
-- 老版本：`~/.cache/ocsb/ironclaw_v0_XX_X/`
+- 非空 slug 变体：`~/.cache/ocsb/$VARIANT/`，例如：
+  - `ironclaw_v0_27_0` → `~/.cache/ocsb/ironclaw_v0_27_0/`
+  - `ironclaw_x86_64_v3` → `~/.cache/ocsb/ironclaw_x86_64_v3/`
+  - `ironclaw_v0_27_0_x86_64_v3` → `~/.cache/ocsb/ironclaw_v0_27_0_x86_64_v3/`
 
 Ironclaw 的 ocsb state 固定在 `$PERSIST_DIR/state/ironclaw/`，不再跟随启动目录生成 `~/.cache/ocsb/<project-hash>/ironclaw`。其中 `chroot/merged` 是 bind 到沙箱内 `/nix` 的合并后 chroot store；`overlay/` 只存 overlayfs 的 upper/work 等实现细节，不直接暴露进沙箱。
 
 覆盖：`OCSB_IRONCLAW_PERSIST_DIR=/path` 或 `--persist-dir /path`。
+
+**DB 模式（wrapper host-side 控制）**：
+
+- `embedded`（默认）：保持旧行为，沙箱内启动本地 postgres18 + pgvector，使用 unix socket。
+- `external`：不在本地启动 postgres，也不挂载本地 `pgdata`/`pgrun`；必须由调用方提供 `DATABASE_URL`（建议通过环境变量）。
+- `sidecar`：wrapper 在宿主机管理具名 OCI postgres+pgvector 容器，生成 DB 连接参数。
+
+`external`/`sidecar` 下，DB 相关 env（`DATABASE_URL`、`DATABASE_BACKEND`、`DATABASE_SSLMODE`、`DATABASE_POOL_SIZE`、`PGHOST`、`PGPORT`、`PGUSER`、`PGPASSWORD`、`PGDATABASE`）不会通过 inner `ocsb --env` 或 `OCSB_FORWARD_ENV` 传递；wrapper 会把它们写到 `$PERSIST_DIR/state/ironclaw-db.env`（0600），只读挂载进沙箱后由 `templates/ironclaw.nix` 的 preExec `source`。这样可避免 secret 出现在 `bwrap --setenv` argv 或 inner launcher argv。
+
+`OCSB_IRONCLAW_DB_MODE` 仍按普通 env 转发（非 secret）。
+
+可用参数（CLI 与环境变量一一对应）：
+
+- `--db-mode MODE` / `OCSB_IRONCLAW_DB_MODE`：`embedded|external|sidecar`（默认 `embedded`）
+- `--db-sidecar-runtime RUNTIME` / `OCSB_IRONCLAW_DB_SIDECAR_RUNTIME`：`podman|docker`（默认 `podman`）
+- `--db-sidecar-container NAME` / `OCSB_IRONCLAW_DB_SIDECAR_CONTAINER`：sidecar 容器名（默认按 wrapper 变体稳定生成，例如最新版 `ocsb-ironclaw-db`）
+- `--db-sidecar-image IMAGE` / `OCSB_IRONCLAW_DB_SIDECAR_IMAGE`：sidecar 镜像（默认 `docker.io/pgvector/pgvector:pg18`）
+- `--db-sidecar-port PORT` / `OCSB_IRONCLAW_DB_SIDECAR_PORT`：映射到容器 `5432` 的宿主端口（默认 `55432`）
+
+sidecar 容器生命周期按“容器名”判定：
+
+1. 容器正在运行：直接复用。
+2. 容器存在但已停止：先 `start` 后复用。
+3. 容器不存在：`run/create` 新容器。
+
+随后 wrapper 会等待 `pg_isready`，并尝试确保 `ironclaw` 数据库与 `vector` 扩展存在。
+
+sidecar 专用持久化：
+
+- 数据目录：`$PERSIST_DIR/pgdata-sidecar`
+- 自动生成密码：`$PERSIST_DIR/sidecar-db-password`（0600）
+- DB env 文件：`$PERSIST_DIR/state/ironclaw-db.env`（0600，host 私有；只读挂载到沙箱内后 source）
+
+Ironclaw wrapper 启动内层 ocsb 前会先切到 `$PERSIST_DIR/workspace`，所以沙箱内 `/workspace` 是 Ironclaw 自己的稳定目录，不会把你运行命令时所在的宿主目录（例如 `~`）直接暴露进去。
+
+外置 DB 示例：`DATABASE_URL='postgres://user:pass@host:5432/ironclaw?sslmode=require' ocsb-ironclaw --db-mode external --env DATABASE_URL`。此处 `--env DATABASE_URL` 只用于把 host 值读入 wrapper；该 DB 值不会作为 inner `--env` 参数继续下传。
 
 **网络**：Ironclaw 默认共享宿主网络（`network.enable = null`）。原因是它的 postgres 初始化必须以非 root uid 运行，而当前 filtered/slirp4netns 模式需要沙盒内 uid 0 才能让宿主侧 slirp helper 进入网络 namespace。后续如果实现 multi-uid user namespace 映射，再恢复 filtered 网络隔离。
 

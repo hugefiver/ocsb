@@ -58,12 +58,12 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 
 ## IRONCLAW CONTRACT
 
-- Latest persist dir defaults to `~/.cache/ocsb/ironclaw/`; versioned wrappers use separate `ironclaw_v0_XX_X` dirs.
+- Latest persist dir defaults to `~/.cache/ocsb/ironclaw/`; non-empty slug wrappers use separate `~/.cache/ocsb/ironclaw_<variant>/` dirs, including versioned and arch variants.
 - The wrapper exports `OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"`, so ocsb state is stable at `$PERSIST_DIR/state/ironclaw/` regardless of launch cwd.
-- App persistence is wrapper-mounted: `home/`, `data/`, `pgdata/`, `pgrun/`.
+- App persistence is wrapper-mounted: `home/`, `data/`, stable `workspace/`, and DB-mode-specific state (`pgdata`/`pgrun` for embedded, `pgdata-sidecar` plus `state/ironclaw-db.env` for sidecar/external DB env delivery).
 - Ironclaw workspace strategy is `direct`; cwd is not the persistence boundary.
 - Ironclaw network is host (`network.enable = null`) because PostgreSQL must not run as uid 0, while filtered slirp currently needs uid 0 inside the user namespace.
-- Ironclaw preExec initializes PostgreSQL 18 + pgvector, sets `IRONCLAW_DATA_DIR`, and persists `SECRETS_MASTER_KEY` in app data.
+- Ironclaw preExec initializes PostgreSQL 18 + pgvector in embedded mode; external/sidecar modes source a private mounted DB env file, then set `IRONCLAW_DATA_DIR` and persist `SECRETS_MASTER_KEY` in app data.
 
 ## CONVENTIONS
 
