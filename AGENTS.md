@@ -83,6 +83,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 - Do not remove legacy layout cleanup without replacing tests.
 - Do not split implementation changes from their shell regression tests when committing.
 - Do not install local tooling just to run checks; use existing Nix/dev tools or remote Linux verification.
+- Do not build the Ironclaw Rust package (`pkgs/ironclaw.nix`) during local development; it is time-consuming and not needed to validate wrapper/template/test changes. Use `nix flake check --no-build` and `nix build .#packages.x86_64-linux.default` (which builds only the ocsb wrapper, not Ironclaw) for script-level verification. Only build `.#ironclaw-sandbox` or `.#ironclaw-sandbox_x86_64_v3` when explicitly requested or on CI.
 
 ## VERIFICATION GATES
 
