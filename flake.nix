@@ -206,9 +206,26 @@
               esac
             }
 
+            is_reserved_ironclaw_env_name() {
+              case "$1" in
+                OCSB_IRONCLAW_DB_MODE|OCSB_IRONCLAW_DB_ENV_FILE)
+                  return 0
+                  ;;
+                *)
+                  return 1
+                  ;;
+              esac
+            }
+
             write_db_env_file() {
               local _db_env_file="$1"
+              local _db_env_dir _db_env_base _db_env_tmp
               local _db_env_name
+
+              _db_env_dir="$(${pkgs.coreutils}/bin/dirname "$_db_env_file")"
+              _db_env_base="$(${pkgs.coreutils}/bin/basename "$_db_env_file")"
+              _db_env_tmp="$(${pkgs.coreutils}/bin/mktemp "$_db_env_dir/.$_db_env_base.XXXXXX")"
+              trap '[[ -n "''${_db_env_tmp:-}" ]] && ${pkgs.coreutils}/bin/rm -f "$_db_env_tmp"' RETURN
 
               (
                 umask 077
@@ -218,9 +235,12 @@
                       printf 'export %s=%q\n' "$_db_env_name" "''${!_db_env_name}"
                     fi
                   done
-                } > "$_db_env_file"
+                } > "$_db_env_tmp"
               )
-              chmod 0600 "$_db_env_file" 2>/dev/null || true
+              chmod 0600 "$_db_env_tmp" 2>/dev/null || true
+              ${pkgs.coreutils}/bin/mv -f "$_db_env_tmp" "$_db_env_file"
+              _db_env_tmp=""
+              trap - RETURN
             }
 
             while [[ $# -gt 0 ]]; do
@@ -293,6 +313,10 @@
                   fi
                   if [[ ! "$_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
                     echo "ocsb-$VARIANT: invalid --env name: $_ENV_NAME" >&2
+                    exit 1
+                  fi
+                  if is_reserved_ironclaw_env_name "$_ENV_NAME"; then
+                    echo "ocsb-$VARIANT: --env $_ENV_NAME is reserved for the Ironclaw wrapper" >&2
                     exit 1
                   fi
                   export "$_ENV_NAME=$_ENV_VALUE"

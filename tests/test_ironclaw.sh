@@ -138,6 +138,8 @@ assert_contains "help: db env file path documented" "$HELP_TEXT" 'state/ironclaw
 assert_contains "wrapper: variant default persist branch present" "$WRAPPER_TEXT" 'PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT"'
 assert "wrapper: no DB env names forwarded via OCSB_FORWARD_ENV" bash -lc '! grep -Fq -- "append_forward_env_name DATABASE_URL" "$1"' _ "$WRAPPER_SCRIPT"
 assert_contains "wrapper: DB --env gate present" "$WRAPPER_TEXT" 'if ! is_db_env_name "$_ENV_NAME"; then'
+assert_contains "wrapper: reserved internal env gate present" "$WRAPPER_TEXT" 'is_reserved_ironclaw_env_name "$_ENV_NAME"'
+assert_contains "wrapper: db env file uses atomic rename" "$WRAPPER_TEXT" 'mv -f "$_db_env_tmp" "$_db_env_file"'
 
 echo "--- wrapper + embedded mode smoke ---"
 "$WRAPPER" --strategy direct --overwrite --persist-dir "$PERSIST_EMBEDDED" -- --version
@@ -199,8 +201,22 @@ set -e
 assert "external mode without DATABASE_URL fails" test "$EXTERNAL_RC" -ne 0
 assert_contains "external mode failure message" "$EXTERNAL_ERR" "requires DATABASE_URL"
 
+set +e
+RESERVED_MODE_ERR="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_EXTERNAL" --db-mode external --env OCSB_IRONCLAW_DB_MODE=embedded -- --version 2>&1)"
+RESERVED_MODE_RC=$?
+RESERVED_FILE_ERR="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_EXTERNAL" --db-mode external --env OCSB_IRONCLAW_DB_ENV_FILE=/tmp/evil.env -- --version 2>&1)"
+RESERVED_FILE_RC=$?
+set -e
+assert "reserved db mode env fails" test "$RESERVED_MODE_RC" -ne 0
+assert_contains "reserved db mode env failure message" "$RESERVED_MODE_ERR" "reserved for the Ironclaw wrapper"
+assert "reserved db env file env fails" test "$RESERVED_FILE_RC" -ne 0
+assert_contains "reserved db env file failure message" "$RESERVED_FILE_ERR" "reserved for the Ironclaw wrapper"
+
 EXTERNAL_DB_URL="postgres://extuser:extpass@db.example:5432/ironclaw?sslmode=require"
 EXTERNAL_NON_DB_FLAG="external-non-db-flag-$$"
+mkdir -p "$PERSIST_EXTERNAL/state"
+printf 'stale-db-env\n' > "$PERSIST_EXTERNAL/state/ironclaw-db.env"
+chmod 0644 "$PERSIST_EXTERNAL/state/ironclaw-db.env"
 EXTERNAL_OUTPUT="$(
   PATH="$FAKE_BIN:$PATH" \
   OCSB_FAKE_OCI_LOG="$TMPDIR/external-sidecar.log" \
@@ -223,6 +239,8 @@ EXTERNAL_DB_ENV_FILE="$PERSIST_EXTERNAL/state/ironclaw-db.env"
 assert "external db env file exists" test -s "$EXTERNAL_DB_ENV_FILE"
 assert "external db env file mode 0600" test "$(stat -c %a "$EXTERNAL_DB_ENV_FILE")" = "600"
 assert "external db env file exports DATABASE_URL" grep -Fq -- "export DATABASE_URL=" "$EXTERNAL_DB_ENV_FILE"
+assert "external db env file stale content removed" bash -lc '! grep -Fq -- "stale-db-env" "$1"' _ "$EXTERNAL_DB_ENV_FILE"
+assert "external db env temp files cleaned" bash -lc '! compgen -G "$1/state/.ironclaw-db.env.*" >/dev/null' _ "$PERSIST_EXTERNAL"
 
 EXT_ENVFILE_CHECK="$({
   source "$EXTERNAL_DB_ENV_FILE"
