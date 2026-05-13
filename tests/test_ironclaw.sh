@@ -135,11 +135,14 @@ WRAPPER_TEXT="$(cat "$WRAPPER_SCRIPT")"
 assert_contains "help: variant-scoped persist default" "$HELP_TEXT" 'Default: $HOME/.cache/ocsb/$VARIANT'
 assert_contains "help: latest alias persist default note" "$HELP_TEXT" 'latest alias uses $HOME/.cache/ocsb/ironclaw'
 assert_contains "help: db env file path documented" "$HELP_TEXT" 'state/ironclaw-db.env'
+assert_contains "help: fixed sidecar container default" "$HELP_TEXT" 'Default: ocsb-ironclaw-db.'
 assert_contains "wrapper: variant default persist branch present" "$WRAPPER_TEXT" 'PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT"'
+assert_contains "wrapper: fixed sidecar container default" "$WRAPPER_TEXT" 'DB_SIDECAR_CONTAINER="ocsb-ironclaw-db"'
 assert "wrapper: no DB env names forwarded via OCSB_FORWARD_ENV" bash -lc '! grep -Fq -- "append_forward_env_name DATABASE_URL" "$1"' _ "$WRAPPER_SCRIPT"
 assert_contains "wrapper: DB --env gate present" "$WRAPPER_TEXT" 'if ! is_db_env_name "$_ENV_NAME"; then'
 assert_contains "wrapper: reserved internal env gate present" "$WRAPPER_TEXT" 'is_reserved_ironclaw_env_name "$_ENV_NAME"'
 assert_contains "wrapper: db env file uses atomic rename" "$WRAPPER_TEXT" 'mv -f "$_db_env_tmp" "$_db_env_file"'
+assert_contains "wrapper: sidecar pg18 mount target" "$WRAPPER_TEXT" '/var/lib/postgresql'
 
 echo "--- wrapper + embedded mode smoke ---"
 "$WRAPPER" --strategy direct --overwrite --persist-dir "$PERSIST_EMBEDDED" -- --version
@@ -355,6 +358,7 @@ PATH="$FAKE_BIN:$PATH" OCSB_FAKE_OCI_LOG="$MISSING_LOG" OCSB_EXEC_OVERRIDE=1 \
 MISSING_LOG_TEXT="$(cat "$MISSING_LOG")"
 assert_contains "sidecar missing: uses docker runtime" "$MISSING_LOG_TEXT" "docker inspect --format {{.State.Status}} sidecar-missing"
 assert_contains "sidecar missing: creates new container" "$MISSING_LOG_TEXT" "docker run -d --name sidecar-missing"
+assert_contains "sidecar missing: mounts pg18 data root" "$MISSING_LOG_TEXT" "$PERSIST_SIDECAR/pgdata-sidecar:/var/lib/postgresql"
 assert "sidecar missing: does not call start" bash -lc '! grep -Fq -- "docker start sidecar-missing" "$1"' _ "$MISSING_LOG"
 
 echo ""

@@ -73,9 +73,6 @@
             set -euo pipefail
 
             VARIANT="ironclaw${slug}"
-            VARIANT_SAFE="$VARIANT"
-            VARIANT_SAFE="''${VARIANT_SAFE//[^A-Za-z0-9_.-]/-}"
-            VARIANT_SAFE="''${VARIANT_SAFE//_/-}"
             DB_ENV_FILE_SANDBOX="/tmp/ocsb-ironclaw-db.env"
 
             PERSIST_DIR=""
@@ -108,7 +105,7 @@
               --db-sidecar-runtime RUNTIME  Sidecar OCI runtime: podman|docker.
                                             Default: podman.
               --db-sidecar-container NAME   Sidecar container name.
-                                            Default: variant-specific stable name.
+                                            Default: ocsb-ironclaw-db.
               --db-sidecar-image IMAGE      Sidecar image.
                                             Default: docker.io/pgvector/pgvector:pg18.
               --db-sidecar-port PORT        Host loopback port mapped to sidecar 5432.
@@ -360,11 +357,7 @@ USAGE_EOF
             esac
 
             if [[ -z "$DB_SIDECAR_CONTAINER" ]]; then
-              if [[ "$VARIANT_SAFE" == "ironclaw" ]]; then
-                DB_SIDECAR_CONTAINER="ocsb-ironclaw-db"
-              else
-                DB_SIDECAR_CONTAINER="ocsb-''${VARIANT_SAFE}-db"
-              fi
+              DB_SIDECAR_CONTAINER="ocsb-ironclaw-db"
             fi
 
             if [[ "$DB_MODE" == "sidecar" ]]; then
@@ -470,7 +463,7 @@ EOF
                 if ! "$DB_SIDECAR_RUNTIME" run -d \
                   --name "$DB_SIDECAR_CONTAINER" \
                   --env-file "$_SIDECAR_ENV_FILE" \
-                  --volume "$PERSIST_DIR/pgdata-sidecar:/var/lib/postgresql/data" \
+                  --volume "$PERSIST_DIR/pgdata-sidecar:/var/lib/postgresql" \
                   --publish "127.0.0.1:$DB_SIDECAR_PORT:5432" \
                   "$DB_SIDECAR_IMAGE" >/dev/null; then
                   ${pkgs.coreutils}/bin/rm -f "$_SIDECAR_ENV_FILE"
