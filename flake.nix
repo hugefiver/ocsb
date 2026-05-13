@@ -93,7 +93,7 @@
             DB_ENV_HOST_FILE=""
 
             usage() {
-              cat <<EOF
+              cat <<USAGE_EOF
             Usage: ocsb-$VARIANT [OPTIONS] [-- COMMAND...]
 
             Run NEAR AI Ironclaw inside an isolated ocsb sandbox with persistent
@@ -158,7 +158,7 @@
             External/sidecar DB env delivery:
               \$PERSIST_DIR/state/ironclaw-db.env (0600, host private)
               -> mounted read-only at $DB_ENV_FILE_SANDBOX inside sandbox.
-            EOF
+USAGE_EOF
             }
 
             append_forward_env_name() {
