@@ -39,7 +39,7 @@ assert "SANDBOX is set" [ "${SANDBOX:-}" = "1" ]
 assert "HOME is /home/sandbox" [ "$HOME" = "/home/sandbox" ]
 assert "OCSB_WORKSPACE is set" [ -n "${OCSB_WORKSPACE:-}" ]
 assert "OCSB_STRATEGY is set" [ -n "${OCSB_STRATEGY:-}" ]
-assert "PATH is /usr/bin" [ "$PATH" = "/usr/bin" ]
+assert "PATH includes nix profile dirs" bash -c 'case ":$PATH:" in *:/home/sandbox/.nix-profile/bin:*:/nix/var/nix/profiles/default/bin:*:/usr/bin:*) exit 0;; *) exit 1;; esac'
 echo ""
 
 # --- Whitelisted commands exist ---

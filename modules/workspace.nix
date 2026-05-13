@@ -37,5 +37,19 @@
         Users can override at runtime with --workspace flag.
       '';
     };
+
+    sandboxDir = lib.mkOption {
+      type = lib.types.addCheck lib.types.str (v:
+        lib.hasPrefix "/" v
+        && v != "/"
+        && !(lib.hasSuffix "/" v)
+        && !(lib.hasInfix ".." v)
+      );
+      default = "/workspace";
+      description = ''
+        Absolute path where the selected workspace is mounted inside the sandbox.
+        Relative CLI mount destinations resolve under this directory.
+      '';
+    };
   };
 }

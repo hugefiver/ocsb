@@ -77,12 +77,13 @@ let
     else "${sandboxBin}/bin/bash";
 
   # PATH inside sandbox: include app's bin dir if a package is configured,
-  # so the app's command is callable by bare name (e.g. `ironclaw` works
-  # in --shell / --attach sessions without typing the full store path).
+  # plus common Nix profile locations so `nix profile install` binaries are
+  # immediately callable in interactive sessions.
+  nixProfilePath = "/home/sandbox/.nix-profile/bin:/nix/var/nix/profiles/default/bin";
   sandboxPath =
     if cfg.app.package != null
-    then "${cfg.app.package}/bin:/usr/bin"
-    else "/usr/bin";
+    then "${cfg.app.package}/bin:${nixProfilePath}:/usr/bin"
+    else "${nixProfilePath}:/usr/bin";
 
   attachEnvPath = "/tmp/ocsb-attach.env";
 
@@ -860,13 +861,13 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           ${pkgs.coreutils}/bin/mkdir -p "$_WORKSPACE_OVERLAY_STATE/upper" "$_WORKSPACE_OVERLAY_STATE/work"
           STRATEGY_FLAGS=(
             --overlay-src "$PROJECT_DIR"
-            --overlay "$_WORKSPACE_OVERLAY_STATE/upper" "$_WORKSPACE_OVERLAY_STATE/work" /workspace
+            --overlay "$_WORKSPACE_OVERLAY_STATE/upper" "$_WORKSPACE_OVERLAY_STATE/work" "$WORKSPACE_SANDBOX_DIR"
           )
           echo "ocsb: overlay workspace at $_WORKSPACE_OVERLAY_STATE" >&2
           ;;
         direct)
           STRATEGY_FLAGS=(
-            --bind "$PROJECT_DIR" /workspace
+            --bind "$PROJECT_DIR" "$WORKSPACE_SANDBOX_DIR"
           )
           echo "ocsb: direct mount (read-write, no isolation)" >&2
           ;;
@@ -890,7 +891,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             echo "ocsb: created btrfs snapshot at $BTRFS_SNAP" >&2
           fi
           STRATEGY_FLAGS=(
-            --bind "$BTRFS_SNAP" /workspace
+            --bind "$BTRFS_SNAP" "$WORKSPACE_SANDBOX_DIR"
           )
           ;;
         git-worktree)
@@ -913,7 +914,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             echo "ocsb: created git worktree at $GWT_DIR" >&2
           fi
           STRATEGY_FLAGS=(
-            --bind "$GWT_DIR" /workspace
+            --bind "$GWT_DIR" "$WORKSPACE_SANDBOX_DIR"
           )
           ;;
         *)
@@ -930,7 +931,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       # User-configured read-write mounts
       ${mkMountArrayEntries "--bind-try" cfg.mounts.rw}
 
-      # Workspace strategy mounts (must come before runtime mounts so /workspace exists)
+      # Workspace strategy mounts (must come before runtime mounts so workspace dir exists)
       BWRAP_ARGS+=("''${STRATEGY_FLAGS[@]}")
 
       # Runtime CLI mounts (--ro / --rw flags) — after strategy so /workspace is available
@@ -1151,6 +1152,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     # =========================================================
     WORKSPACE_NAME=${lib.escapeShellArg cfg.workspace.name}
     WORKSPACE_STRATEGY=${lib.escapeShellArg cfg.workspace.strategy}
+    WORKSPACE_SANDBOX_DIR=${lib.escapeShellArg cfg.workspace.sandboxDir}
     PROJECT_DIR="$(${pkgs.coreutils}/bin/realpath "$(pwd)")"
     CONTINUE=0
     OVERWRITE=0
@@ -1230,11 +1232,11 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             echo "ocsb: sandbox path cannot contain '..': $_MOUNT_SANDBOX" >&2
             exit 1
           fi
-          # Resolve sandbox path: relative → /workspace/...
+          # Resolve sandbox path: relative → workspace sandbox dir
           if [[ "$_MOUNT_SANDBOX" == "./"* ]]; then
-            _MOUNT_SANDBOX="/workspace/''${_MOUNT_SANDBOX:2}"
+            _MOUNT_SANDBOX="$WORKSPACE_SANDBOX_DIR/''${_MOUNT_SANDBOX:2}"
           elif [[ "$_MOUNT_SANDBOX" != /* ]]; then
-            _MOUNT_SANDBOX="/workspace/$_MOUNT_SANDBOX"
+            _MOUNT_SANDBOX="$WORKSPACE_SANDBOX_DIR/$_MOUNT_SANDBOX"
           fi
           # Add to runtime mounts
           if [[ "$_MOUNT_FLAG" == "--ro" ]]; then
@@ -1266,9 +1268,9 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             exit 1
           fi
           if [[ "$_DM_SANDBOX" == "./"* ]]; then
-            _DM_SANDBOX="/workspace/''${_DM_SANDBOX:2}"
+            _DM_SANDBOX="$WORKSPACE_SANDBOX_DIR/''${_DM_SANDBOX:2}"
           elif [[ "$_DM_SANDBOX" != /* ]]; then
-            _DM_SANDBOX="/workspace/$_DM_SANDBOX"
+            _DM_SANDBOX="$WORKSPACE_SANDBOX_DIR/$_DM_SANDBOX"
           fi
           if [[ "$_DM_FLAG" == "--overlay-mount" ]]; then
             OVERLAY_MOUNTS+=("$_DM_HOST" "$_DM_SANDBOX")
@@ -1547,7 +1549,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
 
     # Working directory and command
     BWRAP_ARGS+=(
-      --chdir /workspace
+      --chdir "$WORKSPACE_SANDBOX_DIR"
     )
 
     # =========================================================
