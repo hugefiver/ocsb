@@ -58,11 +58,12 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 
 ## IRONCLAW CONTRACT
 
-- Latest persist dir defaults to `~/.cache/ocsb/ironclaw/`; non-empty slug wrappers use separate `~/.cache/ocsb/ironclaw_<variant>/` dirs, including versioned and arch variants.
+- Latest persist dir defaults to `~/.cache/ocsb/ironclaw/`; versioned wrappers use `~/.cache/ocsb/ironclaw_<version>/`; arch-optimized wrappers do NOT add arch suffixes to the persist dir.
 - The wrapper exports `OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"`, so ocsb state is stable at `$PERSIST_DIR/state/ironclaw/` regardless of launch cwd.
-- App persistence is wrapper-mounted: `home/`, `data/`, stable `workspace/`, and DB-mode-specific state (`pgdata`/`pgrun` for embedded, `pgdata-sidecar` plus `state/ironclaw-db.env` for sidecar/external DB env delivery).
+- App persistence is wrapper-mounted: `home/` as `/home/sandbox` and Ironclaw workspace/cwd, `data/`, and DB-mode-specific state (`pgdata`/`pgrun` for embedded, `pgdata-sidecar` plus `state/ironclaw-db.env` for sidecar/external DB env delivery). Do not create a separate Ironclaw `workspace/` persist dir.
 - Sidecar DB container defaults to the fixed name `ocsb-ironclaw-db` across Ironclaw wrapper variants; `pgdata-sidecar` must be mounted at container `/var/lib/postgresql` for PostgreSQL 18+ images.
-- Ironclaw workspace strategy is `direct`; cwd is not the persistence boundary.
+- Ironclaw workspace strategy is `direct` with sandboxDir `/home/sandbox`; cwd is not the caller's launch directory.
+- Sandbox PATH includes Nix profile bins (`/home/sandbox/.nix-profile/bin` and `/nix/var/nix/profiles/default/bin`) so `nix profile install` outputs are immediately usable.
 - Ironclaw network is host (`network.enable = null`) because PostgreSQL must not run as uid 0, while filtered slirp currently needs uid 0 inside the user namespace.
 - Ironclaw preExec initializes PostgreSQL 18 + pgvector in embedded mode; external/sidecar modes source a private mounted DB env file, then set `IRONCLAW_DATA_DIR` and persist `SECRETS_MASTER_KEY` in app data.
 

@@ -140,14 +140,14 @@ v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、
 
 ## Ironclaw 专用说明
 
-每个版本独立 flake input + 独立持久化目录。
+每个版本独立 flake input；CPU arch 优化 wrapper 共享同一版本的数据目录。
 
 **持久化路径**（默认 embedded 模式会首次启动自动初始化 postgres + pgvector，在沙箱内 unix socket 上跑）：
 - 最新版：`~/.cache/ocsb/ironclaw/`
-- 非空 slug 变体：`~/.cache/ocsb/$VARIANT/`，例如：
+- 版本 slug 变体：`~/.cache/ocsb/ironclaw_<version>/`，例如：
   - `ironclaw_v0_27_0` → `~/.cache/ocsb/ironclaw_v0_27_0/`
-  - `ironclaw_x86_64_v3` → `~/.cache/ocsb/ironclaw_x86_64_v3/`
-  - `ironclaw_v0_27_0_x86_64_v3` → `~/.cache/ocsb/ironclaw_v0_27_0_x86_64_v3/`
+  - `ironclaw_x86_64_v3` → `~/.cache/ocsb/ironclaw/`
+  - `ironclaw_v0_27_0_x86_64_v3` → `~/.cache/ocsb/ironclaw_v0_27_0/`
 
 Ironclaw 的 ocsb state 固定在 `$PERSIST_DIR/state/ironclaw/`，不再跟随启动目录生成 `~/.cache/ocsb/<project-hash>/ironclaw`。其中 `chroot/merged` 是 bind 到沙箱内 `/nix` 的合并后 chroot store；`overlay/` 只存 overlayfs 的 upper/work 等实现细节，不直接暴露进沙箱。
 
@@ -185,13 +185,13 @@ sidecar 专用持久化：
 - 自动生成密码：`$PERSIST_DIR/sidecar-db-password`（0600）
 - DB env 文件：`$PERSIST_DIR/state/ironclaw-db.env`（0600，host 私有；只读挂载到沙箱内后 source）
 
-Ironclaw wrapper 启动内层 ocsb 前会先切到 `$PERSIST_DIR/workspace`，所以沙箱内 `/workspace` 是 Ironclaw 自己的稳定目录，不会把你运行命令时所在的宿主目录（例如 `~`）直接暴露进去。
+Ironclaw wrapper 启动内层 ocsb 前会先切到 `$PERSIST_DIR/home`，并把它直接作为沙箱内 `/home/sandbox` workspace；不再额外创建 `$PERSIST_DIR/workspace`。因此 Ironclaw 的 `HOME`、cwd、`.ironclaw/`、`.claude/` 都落在同一个持久化 home tree。
 
 外置 DB 示例：`DATABASE_URL='postgres://user:pass@host:5432/ironclaw?sslmode=require' ocsb-ironclaw --db-mode external --env DATABASE_URL`。此处 `--env DATABASE_URL` 只用于把 host 值读入 wrapper；该 DB 值不会作为 inner `--env` 参数继续下传。
 
 **网络**：Ironclaw 默认共享宿主网络（`network.enable = null`）。原因是它的 postgres 初始化必须以非 root uid 运行，而当前 filtered/slirp4netns 模式需要沙盒内 uid 0 才能让宿主侧 slirp helper 进入网络 namespace。后续如果实现 multi-uid user namespace 映射，再恢复 filtered 网络隔离。
 
-**沙箱内 nix**：默认 `nixStoreMode = "chroot"` —— 首次启动先尝试用 hard link 预填充闭包并注册 chroot store DB；如果 `/nix/store` 与 workspace 不在同一 filesystem、权限阻止硬链接，或 DB 注册失败，则自动 fallback 到 `nix copy`。最终 `$OCSB_STATE_DIR/chroot/merged/nix/store` 会 bind-mount 进沙箱，可在沙箱内 `nix profile add nixpkgs#foo`（cache.nixos.org 可用）。可改 `experimental.nixStoreMode = "host-daemon"`（只读绑定宿主 `/nix/store`，写入走宿主 nix-daemon socket，需要宿主 daemon 权限策略收紧）或 `"closure"`（只挂闭包 RO，最小面）。`/nix/store` 不再使用 overlayfs：宿主 store 是 root-owned lower，unprivileged user namespace 下 copy-up 会遇到 ownership/permission 问题；workspace 的 `overlayfs` 策略不受影响。
+**沙箱内 nix**：默认 `nixStoreMode = "chroot"` —— 首次启动先尝试用 hard link 预填充闭包并注册 chroot store DB；如果 `/nix/store` 与 workspace 不在同一 filesystem、权限阻止硬链接，或 DB 注册失败，则自动 fallback 到 `nix copy`。最终 `$OCSB_STATE_DIR/chroot/merged/nix/store` 会 bind-mount 进沙箱，可在沙箱内 `nix profile add nixpkgs#foo`（cache.nixos.org 可用）。默认 `PATH` 已包含 `/home/sandbox/.nix-profile/bin` 和 `/nix/var/nix/profiles/default/bin`，profile 安装的命令可直接调用。可改 `experimental.nixStoreMode = "host-daemon"`（只读绑定宿主 `/nix/store`，写入走宿主 nix-daemon socket，需要宿主 daemon 权限策略收紧）或 `"closure"`（只挂闭包 RO，最小面）。`/nix/store` 不再使用 overlayfs：宿主 store 是 root-owned lower，unprivileged user namespace 下 copy-up 会遇到 ownership/permission 问题；workspace 的 `overlayfs` 策略不受影响。
 
 **升级到新 release**（保留最近 2 个版本）：
 1. 在 `flake.nix` 把当前 `ironclaw-src` 改名为 `ironclaw-src-v0_XX_X`
