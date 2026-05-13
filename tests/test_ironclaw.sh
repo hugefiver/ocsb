@@ -132,11 +132,13 @@ echo "--- wrapper help text ---"
 HELP_TEXT="$($WRAPPER --help)"
 WRAPPER_SCRIPT="$(readlink -f "$WRAPPER")"
 WRAPPER_TEXT="$(cat "$WRAPPER_SCRIPT")"
-assert_contains "help: variant-scoped persist default" "$HELP_TEXT" 'Default: $HOME/.cache/ocsb/$VARIANT'
-assert_contains "help: latest alias persist default note" "$HELP_TEXT" 'latest alias uses $HOME/.cache/ocsb/ironclaw'
+assert_contains "help: persist default uses persist variant" "$HELP_TEXT" 'Default: $HOME/.cache/ocsb/$PERSIST_VARIANT.'
+assert_contains "help: arch wrappers share non-arch data dir" "$HELP_TEXT" 'Arch-optimized wrappers share the'
 assert_contains "help: db env file path documented" "$HELP_TEXT" 'state/ironclaw-db.env'
 assert_contains "help: fixed sidecar container default" "$HELP_TEXT" 'Default: ocsb-ironclaw-db.'
-assert_contains "wrapper: variant default persist branch present" "$WRAPPER_TEXT" 'PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT"'
+assert_contains "wrapper: persist variant default branch present" "$WRAPPER_TEXT" 'PERSIST_DIR="$HOME/.cache/ocsb/$PERSIST_VARIANT"'
+assert "wrapper: persist default no longer uses arch-suffixed VARIANT" bash -lc '! grep -Fq -- "$2" "$1"' _ "$WRAPPER_SCRIPT" 'PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT"'
+assert_contains "wrapper: launches from persisted home" "$WRAPPER_TEXT" 'cd "$PERSIST_DIR/home"'
 assert_contains "wrapper: fixed sidecar container default" "$WRAPPER_TEXT" 'DB_SIDECAR_CONTAINER="ocsb-ironclaw-db"'
 assert "wrapper: no DB env names forwarded via OCSB_FORWARD_ENV" bash -lc '! grep -Fq -- "append_forward_env_name DATABASE_URL" "$1"' _ "$WRAPPER_SCRIPT"
 assert_contains "wrapper: DB --env gate present" "$WRAPPER_TEXT" 'if ! is_db_env_name "$_ENV_NAME"; then'
@@ -165,6 +167,14 @@ fi
 
 nix --version >/dev/null
 
+case ":$PATH:" in
+  *:/home/sandbox/.nix-profile/bin:*:/nix/var/nix/profiles/default/bin:*) ;;
+  *)
+    echo "expected nix profile paths in PATH, got $PATH" >&2
+    exit 1
+    ;;
+esac
+
 if [[ "$OCSB_STATE_DIR" != "$expected_state_dir" ]]; then
   echo "expected OCSB_STATE_DIR=$expected_state_dir, got $OCSB_STATE_DIR" >&2
   exit 1
@@ -186,7 +196,11 @@ if [[ "${DATABASE_URL:-}" != "postgres:///ironclaw?host=/run/postgresql&sslmode=
 fi
 
 curl -s --max-time 10 https://example.com >/dev/null
-printf 'workspace-ok' > /workspace/ironclaw-workspace-marker
+if [[ "$(pwd)" != "/home/sandbox" ]]; then
+  echo "expected cwd=/home/sandbox, got $(pwd)" >&2
+  exit 1
+fi
+printf 'workspace-ok' > /home/sandbox/ironclaw-workspace-marker
 EOF
 chmod +x "$PROBE_SCRIPT"
 OCSB_EXEC_OVERRIDE=1 "$WRAPPER" --strategy direct --continue --persist-dir "$PERSIST_EMBEDDED" -- bash /home/sandbox/ironclaw-probe.sh "$EXPECTED_STATE_DIR"
@@ -194,7 +208,8 @@ OCSB_EXEC_OVERRIDE=1 "$WRAPPER" --strategy direct --continue --persist-dir "$PER
 echo "--- stable sandbox state check ---"
 assert "chroot merged nix store exists" test -d "$EXPECTED_STATE_DIR/chroot/merged/nix/store"
 assert "legacy chroot layout removed" test ! -e "$EXPECTED_STATE_DIR/chroot/nix"
-assert "ironclaw /workspace is persist-scoped" test "$(cat "$PERSIST_EMBEDDED/workspace/ironclaw-workspace-marker")" = "workspace-ok"
+assert "ironclaw workspace uses persisted home" test "$(cat "$PERSIST_EMBEDDED/home/ironclaw-workspace-marker")" = "workspace-ok"
+assert "ironclaw wrapper does not create separate workspace dir" test ! -e "$PERSIST_EMBEDDED/workspace"
 
 echo "--- external mode validation + forwarding ---"
 set +e

@@ -29,6 +29,7 @@ in
       esac
 
       mkdir -p "$HOME/.config/nix"
+      mkdir -p "$HOME/.ironclaw" "$HOME/.claude"
       cat > "$HOME/.config/nix/nix.conf" <<EOF
       experimental-features = nix-command flakes
       build-users-group =
@@ -91,6 +92,7 @@ in
 
       mkdir -p /var/lib/ironclaw
       export IRONCLAW_DATA_DIR=/var/lib/ironclaw
+      export IRONCLAW_BASE_DIR="$HOME/.ironclaw"
 
       # Persist a SECRETS_MASTER_KEY so the onboard wizard skips the keychain
       # step (no D-Bus secret service inside the sandbox). 32 random bytes
@@ -117,6 +119,14 @@ in
     file
     git
     curl
+    gh
+    pkg-config
+    gcc
+    gnumake
+    nodejs
+    python3
+    cargo
+    rustc
     # If pgvector is unavailable for postgresql_18 in your pinned nixpkgs,
     # fall back to postgresql_17.withPackages (p: [ p.pgvector ]).
     pgWithExt
@@ -133,10 +143,12 @@ in
   mounts.ro = [];
 
   workspace = {
-    # App persistence lives under wrapper-managed mounts.rw (home, data,
-    # pgdata, etc). The wrapper launches ocsb from $PERSIST_DIR/workspace so
-    # /workspace is stable and independent of the caller's cwd.
+    # App persistence lives under wrapper-managed mounts.rw (data, pgdata,
+    # etc). The wrapper launches ocsb from $PERSIST_DIR/home and mounts that
+    # directory directly as /home/sandbox, so Ironclaw's workspace and HOME are
+    # the same persisted tree.
     strategy = "direct";
+    sandboxDir = "/home/sandbox";
     baseDir = ".ocsb";
     name = "ironclaw";
   };
@@ -152,5 +164,9 @@ in
   env = {
     LANG = "C.UTF-8";
     EDITOR = "cat";
+    RUST_LOG = "ironclaw=info";
+    CLAUDE_CONFIG_DIR = "/home/sandbox/.claude";
+    SANDBOX_ENABLED = "true";
+    SANDBOX_POLICY = "readonly";
   };
 }

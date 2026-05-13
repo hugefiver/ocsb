@@ -65,14 +65,14 @@
             inherit pkgs ironclawPackage;
           });
 
-          # `slug` is empty for the latest alias (-> `ocsb-ironclaw`,
-          # persist dir `~/.cache/ocsb/ironclaw/`). For non-empty slugs,
-          # wrappers and default persist dirs are variant-specific
-          # (`~/.cache/ocsb/ironclaw_<variant>/`).
-          mkSandboxBin = { slug, ironclawSandboxBase }: pkgs.writeShellScriptBin "ocsb-ironclaw${slug}" ''
+          # `slug` controls wrapper/package names. `persistSlug` controls the
+          # default state directory and intentionally omits arch suffixes so
+          # optimized wrappers reuse the same Ironclaw data for a version.
+          mkSandboxBin = { slug, persistSlug ? slug, ironclawSandboxBase }: pkgs.writeShellScriptBin "ocsb-ironclaw${slug}" ''
             set -euo pipefail
 
             VARIANT="ironclaw${slug}"
+            PERSIST_VARIANT="ironclaw${persistSlug}"
             DB_ENV_FILE_SANDBOX="/tmp/ocsb-ironclaw-db.env"
 
             PERSIST_DIR=""
@@ -98,8 +98,9 @@
 
             Options:
               --persist-dir DIR              Override persistent state directory.
-                                            Default: \$HOME/.cache/ocsb/\$VARIANT
-                                            (latest alias uses \$HOME/.cache/ocsb/ironclaw).
+                                            Default: \$HOME/.cache/ocsb/\$PERSIST_VARIANT.
+                                            Arch-optimized wrappers share the
+                                            corresponding non-arch data dir.
               --db-mode MODE                Database mode: embedded|external|sidecar.
                                             Default: embedded.
               --db-sidecar-runtime RUNTIME  Sidecar OCI runtime: podman|docker.
@@ -141,7 +142,6 @@
             Persistent layout (under \$PERSIST_DIR):
               home/            \$HOME inside sandbox (config, history)
               data/            ironclaw application data
-              workspace/       stable /workspace for ironclaw launches
               pgdata/          embedded postgres cluster data
               pgrun/           embedded postgres unix socket
               pgdata-sidecar/  sidecar postgres data directory
@@ -341,10 +341,8 @@ USAGE_EOF
             if [[ -z "$PERSIST_DIR" ]]; then
               if [[ -n "''${OCSB_IRONCLAW_PERSIST_DIR:-}" ]]; then
                 PERSIST_DIR="$OCSB_IRONCLAW_PERSIST_DIR"
-              elif [[ "$VARIANT" == "ironclaw" ]]; then
-                PERSIST_DIR="$HOME/.cache/ocsb/ironclaw"
               else
-                PERSIST_DIR="$HOME/.cache/ocsb/$VARIANT"
+                PERSIST_DIR="$HOME/.cache/ocsb/$PERSIST_VARIANT"
               fi
             fi
 
@@ -394,7 +392,6 @@ USAGE_EOF
             ${pkgs.coreutils}/bin/mkdir -p \
               "$PERSIST_DIR/home" \
               "$PERSIST_DIR/data" \
-              "$PERSIST_DIR/workspace" \
               "$PERSIST_DIR/state"
 
             if [[ "$DB_MODE" == "embedded" ]]; then
@@ -527,7 +524,7 @@ EOF
             fi
             export OCSB_FORWARD_ENV
 
-            cd "$PERSIST_DIR/workspace"
+            cd "$PERSIST_DIR/home"
 
             if [[ "$SHELL_MODE" -eq 1 ]]; then
               export OCSB_EXEC_OVERRIDE=1
@@ -540,7 +537,6 @@ EOF
             export OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"
 
             IRONCLAW_MOUNT_ARGS=(
-              --rw "$PERSIST_DIR/home:/home/sandbox" \
               --rw "$PERSIST_DIR/data:/var/lib/ironclaw"
             )
             if [[ "$DB_MODE" == "embedded" ]]; then
@@ -574,7 +570,7 @@ EOF
               in
               [
                 { name = "ironclaw_${fullSlug}"; value = pkg; }
-                { name = "ironclaw-sandbox_${fullSlug}"; value = mkSandboxBin { slug = "_${fullSlug}"; ironclawSandboxBase = base; }; }
+                { name = "ironclaw-sandbox_${fullSlug}"; value = mkSandboxBin { slug = "_${fullSlug}"; persistSlug = "_${v.slug}"; ironclawSandboxBase = base; }; }
               ]
             ) ironclawArchs
           ) ironclawVersions;
@@ -596,7 +592,7 @@ EOF
             in
             [
               { name = "ironclaw_${a.archSlug}"; value = pkg; }
-              { name = "ironclaw-sandbox_${a.archSlug}"; value = mkSandboxBin { slug = "_${a.archSlug}"; ironclawSandboxBase = base; }; }
+              { name = "ironclaw-sandbox_${a.archSlug}"; value = mkSandboxBin { slug = "_${a.archSlug}"; persistSlug = ""; ironclawSandboxBase = base; }; }
             ]
           ) ironclawArchs;
           latestArchAttrs = lib.listToAttrs latestArchEntries;
