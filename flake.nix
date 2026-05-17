@@ -5,14 +5,19 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # Track ironclaw releases. The "latest" alias (`ironclaw-src`) points at the
-    # newest tag we ship; older releases are pinned independently and remain
-    # buildable as `ironclaw_v0_27_0`, etc. To bump:
-    #   1. Move `ironclaw-src` to the new release tag.
-    #   2. Add the previous tag here (e.g. ironclaw-src-v0_27_0) and register it
-    #      in `ironclawVersions` below.
-    #   3. Drop the oldest entry if the kept-window grows beyond 2 releases.
+    # newest tag we ship; retained older releases are pinned independently and
+    # remain buildable as `ironclaw_v0_28_1`, etc. Retention policy:
+    #   - keep two 0.<minor> series;
+    #   - keep two releases for the newest 0.<minor> series;
+    #   - keep only the latest release for older retained series, unless that
+    #     series gets post-newer-series updates, then append and retain those two
+    #     follow-up releases.
     ironclaw-src = {
-      url = "github:nearai/ironclaw/ironclaw-v0.28.1";
+      url = "github:nearai/ironclaw/ironclaw-v0.28.2";
+      flake = false;
+    };
+    ironclaw-src-v0_28_1 = {
+      url = "github:nearai/ironclaw/11aa7e3f246bb993de0d50b38413afd883c301ed";
       flake = false;
     };
     ironclaw-src-v0_27_0 = {
@@ -21,7 +26,7 @@
     };
   };
 
-  outputs = inputs@{ self, nixpkgs, ironclaw-src, ironclaw-src-v0_27_0, ... }:
+  outputs = inputs@{ self, nixpkgs, ironclaw-src, ironclaw-src-v0_28_1, ironclaw-src-v0_27_0, ... }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
@@ -31,10 +36,23 @@
 
       # Latest first. The first entry's package becomes the unversioned
       # `ironclaw` / `ironclaw-sandbox` aliases.
-      ironclawVersions = [
-        { slug = "v0_28_1"; version = "0.28.1"; src = ironclaw-src; }
-        { slug = "v0_27_0"; version = "0.27.0"; src = ironclaw-src-v0_27_0; }
+      ironclawVersionSeries = [
+        {
+          series = "0.28";
+          releases = [
+            { slug = "v0_28_2"; version = "0.28.2"; src = ironclaw-src; }
+            { slug = "v0_28_1"; version = "0.28.1"; src = ironclaw-src-v0_28_1; }
+          ];
+        }
+        {
+          series = "0.27";
+          releases = [
+            { slug = "v0_27_0"; version = "0.27.0"; src = ironclaw-src-v0_27_0; }
+          ];
+        }
       ];
+
+      ironclawVersions = lib.concatMap (series: series.releases) ironclawVersionSeries;
 
       # Micro-architecture variants. The first entry is the unsuffixed default
       # (psABI x86-64-v1, baseline). Additional entries produce parallel
@@ -616,6 +634,35 @@ EOF
         in
         {
           default = self.packages.${system}.default;
+
+          ironclaw-retention-policy =
+            let
+              actualRetention = map (series: {
+                inherit (series) series;
+                releases = map (release: {
+                  inherit (release) slug version;
+                }) series.releases;
+              }) ironclawVersionSeries;
+              expectedRetention = [
+                {
+                  series = "0.28";
+                  releases = [
+                    { slug = "v0_28_2"; version = "0.28.2"; }
+                    { slug = "v0_28_1"; version = "0.28.1"; }
+                  ];
+                }
+                {
+                  series = "0.27";
+                  releases = [
+                    { slug = "v0_27_0"; version = "0.27.0"; }
+                  ];
+                }
+              ];
+            in
+            assert actualRetention == expectedRetention;
+            pkgs.runCommand "ironclaw-retention-policy" { } ''
+              printf '%s\n' '${builtins.toJSON actualRetention}' > $out
+            '';
 
           net-test = mkSandbox ({ pkgs, ... }: {
             app.name = "ocsb-net-test";

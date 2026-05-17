@@ -3,16 +3,16 @@
     "ironclaw-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1778533194,
-        "narHash": "sha256-5UP6+nYg960z0XjVFI/V8EfXlE0I9E76OKSpapPGp2U=",
+        "lastModified": 1778812226,
+        "narHash": "sha256-XZYGW8ZL/qCvUSh8Rk7Y5GJ6BQc5BkOBbWTZp/a9V7c=",
         "owner": "nearai",
         "repo": "ironclaw",
-        "rev": "11aa7e3f246bb993de0d50b38413afd883c301ed",
+        "rev": "faf2ed446534a4bb403b375da05061ed636427fb",
         "type": "github"
       },
       "original": {
         "owner": "nearai",
-        "ref": "ironclaw-v0.28.1",
+        "ref": "ironclaw-v0.28.2",
         "repo": "ironclaw",
         "type": "github"
       }
@@ -31,6 +31,23 @@
         "owner": "nearai",
         "repo": "ironclaw",
         "rev": "93c7d6a484237999a7a202efd6d54f70d785c0b7",
+        "type": "github"
+      }
+    },
+    "ironclaw-src-v0_28_1": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778533194,
+        "narHash": "sha256-5UP6+nYg960z0XjVFI/V8EfXlE0I9E76OKSpapPGp2U=",
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "11aa7e3f246bb993de0d50b38413afd883c301ed",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "rev": "11aa7e3f246bb993de0d50b38413afd883c301ed",
         "type": "github"
       }
     },
@@ -54,6 +71,7 @@
       "inputs": {
         "ironclaw-src": "ironclaw-src",
         "ironclaw-src-v0_27_0": "ironclaw-src-v0_27_0",
+        "ironclaw-src-v0_28_1": "ironclaw-src-v0_28_1",
         "nixpkgs": "nixpkgs"
       }
     }
