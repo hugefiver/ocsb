@@ -114,6 +114,26 @@ if [[ ! -d "/home/sandbox/.hermes/sessions" ]]; then
   echo "missing /home/sandbox/.hermes/sessions" >&2
   exit 1
 fi
+
+if [[ ! -d "/home/sandbox/.hermes/logs" ]]; then
+  echo "missing /home/sandbox/.hermes/logs" >&2
+  exit 1
+fi
+
+if [[ ! -d "/home/sandbox/.hermes/memories" ]]; then
+  echo "missing /home/sandbox/.hermes/memories" >&2
+  exit 1
+fi
+
+if [[ ! -d "/home/sandbox/.hermes/plugins" ]]; then
+  echo "missing /home/sandbox/.hermes/plugins" >&2
+  exit 1
+fi
+
+if [[ ! -f "/home/sandbox/.hermes/.managed" ]]; then
+  echo "missing /home/sandbox/.hermes/.managed" >&2
+  exit 1
+fi
 EOF
 chmod +x "$PROBE_SCRIPT"
 OCSB_EXEC_OVERRIDE=1 "$WRAPPER" --strategy direct --continue --persist-dir "$PERSIST_MAIN" -- bash /home/sandbox/hermes-probe.sh "$EXPECTED_STATE_DIR"

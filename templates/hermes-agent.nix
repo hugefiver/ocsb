@@ -16,7 +16,8 @@
       export MESSAGING_CWD="/home/sandbox"
 
       mkdir -p "$HOME/.config/nix"
-      mkdir -p "$HERMES_HOME" "$MESSAGING_CWD" "$HERMES_HOME/cron" "$HERMES_HOME/sessions"
+      mkdir -p "$HERMES_HOME" "$MESSAGING_CWD" "$HERMES_HOME/cron" "$HERMES_HOME/sessions" "$HERMES_HOME/logs" "$HERMES_HOME/memories" "$HERMES_HOME/plugins"
+      touch "$HERMES_HOME/.managed"
 
       if [[ ! -f "$HERMES_HOME/config.yaml" ]]; then
         cat > "$HERMES_HOME/config.yaml" <<EOF
