@@ -87,6 +87,13 @@
             inherit mkHermesAgentSandboxBase;
           };
 
+          mkHermesAgentNixConfigSandboxBase = mkSandbox (import ./templates/hermes-agent-nix-config.nix {
+            inherit pkgs hermesAgentPackage;
+          });
+          mkHermesAgentNixConfigSandboxBin = pkgs.callPackage ./scripts/hermes-wrapper.nix {
+            mkHermesAgentSandboxBase = mkHermesAgentNixConfigSandboxBase;
+          };
+
           mkIronclawPackage = { src, version, microArch, ... }: pkgs.callPackage ./pkgs/ironclaw.nix {
             ironclaw-src = src;
             inherit version microArch;
@@ -150,6 +157,7 @@
 
           hermes-agent = hermesAgentPackage;
           hermes-agent-sandbox = mkHermesAgentSandboxBin;
+          hermes-agent-sandbox-nix-config = mkHermesAgentNixConfigSandboxBin;
 
           # Aliases pointing at the latest tracked release (baseline arch).
           ironclaw = latestPkg;
