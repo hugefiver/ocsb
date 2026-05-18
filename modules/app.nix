@@ -25,6 +25,16 @@
       example = "bin/opencode";
     };
 
+    args = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = ''
+        Arguments passed to the app binary at startup.
+        Example: ["gateway" "run" "--replace"] for Hermes Agent gateway mode.
+      '';
+      example = ["gateway" "run" "--replace"];
+    };
+
     name = lib.mkOption {
       type = lib.types.str;
       default = "ocsb";

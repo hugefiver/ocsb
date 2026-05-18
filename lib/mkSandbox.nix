@@ -76,6 +76,9 @@ let
     then "${cfg.app.package}/${cfg.app.binPath}"
     else "${sandboxBin}/bin/bash";
 
+  # Extra arguments passed to the app binary at startup.
+  appArgs = lib.escapeShellArgs cfg.app.args;
+
   # PATH inside sandbox: include app's bin dir if a package is configured,
   # plus common Nix profile locations so `nix profile install` binaries are
   # immediately callable in interactive sessions.
@@ -831,11 +834,11 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         SANDBOX_CMD=("$@")
       else
       ${if cfg.app.package != null then ''
-      SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
+      SANDBOX_CMD=(${lib.escapeShellArg appExec} ${appArgs} "$@")
       '' else ''
       if [[ $# -gt 0 ]]; then
         if [[ "$1" == -* ]]; then
-          SANDBOX_CMD=(${lib.escapeShellArg appExec} "$@")
+          SANDBOX_CMD=(${lib.escapeShellArg appExec} ${appArgs} "$@")
         else
           SANDBOX_CMD=("$@")
         fi
