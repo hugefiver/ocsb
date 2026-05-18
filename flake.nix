@@ -94,21 +94,6 @@
             mkHermesAgentSandboxBase = mkHermesAgentNixConfigSandboxBase;
           };
 
-          # --- Hermes Agent Gateway mode (messaging platforms) ---
-          mkHermesGatewaySandboxBase = mkSandbox (import ./templates/hermes-agent-gateway.nix {
-            inherit pkgs hermesAgentPackage;
-          });
-          mkHermesGatewaySandboxBin = pkgs.callPackage ./scripts/hermes-wrapper.nix {
-            mkHermesAgentSandboxBase = mkHermesGatewaySandboxBase;
-          };
-
-          mkHermesNixConfigGatewaySandboxBase = mkSandbox (import ./templates/hermes-agent-nix-config-gateway.nix {
-            inherit pkgs hermesAgentPackage;
-          });
-          mkHermesNixConfigGatewaySandboxBin = pkgs.callPackage ./scripts/hermes-wrapper.nix {
-            mkHermesAgentSandboxBase = mkHermesNixConfigGatewaySandboxBase;
-          };
-
           mkIronclawPackage = { src, version, microArch, ... }: pkgs.callPackage ./pkgs/ironclaw.nix {
             ironclaw-src = src;
             inherit version microArch;
@@ -171,8 +156,6 @@
           default = mkSandbox (import ./templates/opencode.nix { inherit pkgs; });
 
           hermes-agent = hermesAgentPackage;
-          hermes-agent-sandbox-gateway = mkHermesGatewaySandboxBin;
-          hermes-agent-sandbox-gateway-nix-config = mkHermesNixConfigGatewaySandboxBin;
           hermes-agent-sandbox = mkHermesAgentSandboxBin;
           hermes-agent-sandbox-nix-config = mkHermesAgentNixConfigSandboxBin;
 

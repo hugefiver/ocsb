@@ -10,12 +10,17 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
   FILTERED_ARGS=()
   HAS_CONTINUE_OR_OVERWRITE=0
   SHELL_MODE=0
+  NO_GATEWAY=0
+  GATEWAY_MODE=0
+  REPLACE_MODE=0
 
   usage() {
     cat <<USAGE_EOF
   Usage: ocsb-hermes [OPTIONS] [-- COMMAND...]
 
   Run Hermes Agent inside an isolated ocsb sandbox with persistent home/state.
+  By default starts the messaging gateway as a background service alongside the
+  interactive Hermes CLI.
 
   Options:
     --persist-dir DIR              Override persistent state directory.
@@ -29,6 +34,12 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
                                   Use --attach=PID to target a specific bwrap.
     -s, --shell                    Drop into bash inside sandbox instead of
                                   starting hermes.
+    -g, --gateway                  Run gateway as the sole foreground process
+                                  (no interactive CLI). Useful for systemd services.
+    --replace                      Kill the currently-running ocsb-hermes sandbox,
+                                  then restart as --gateway. Requires --gateway.
+    --no-gateway                   Skip the background gateway service.
+                                  Only the interactive Hermes CLI is started.
     --env NAME[=VALUE]             Forward non-secret env to inner ocsb.
                                   Secret/provider env names are captured into
                                   \$PERSIST_DIR/state/hermes-agent-api-keys.env
@@ -212,6 +223,18 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
         SHELL_MODE=1
         shift
         ;;
+      -g|--gateway)
+        GATEWAY_MODE=1
+        shift
+        ;;
+      --replace)
+        REPLACE_MODE=1
+        shift
+        ;;
+      --no-gateway)
+        NO_GATEWAY=1
+        shift
+        ;;
       --continue|--overwrite)
         HAS_CONTINUE_OR_OVERWRITE=1
         FILTERED_ARGS+=("$1")
@@ -287,6 +310,40 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
     fi
   fi
 
+  # --- gateway / replace logic ---
+  if [[ "$GATEWAY_MODE" -eq 1 ]]; then
+    NO_GATEWAY=1  # template side: don't start background gateway
+    if [[ "$SHELL_MODE" -eq 0 ]]; then
+      # Foreground gateway as sole process (systemd-friendly).
+      export OCSB_EXEC_OVERRIDE=1
+      FILTERED_ARGS+=(-- hermes gateway run --replace)
+    fi
+  fi
+
+  if [[ "$REPLACE_MODE" -eq 1 ]]; then
+    if [[ "$GATEWAY_MODE" -ne 1 ]]; then
+      echo "ocsb-hermes: --replace requires --gateway" >&2
+      exit 1
+    fi
+    # Kill the running instance via pidfile, then restart.
+    _PIDFILE="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/hermes-agent.pid"
+    if [[ -f "$_PIDFILE" ]]; then
+      _OLD_PID="$(${pkgs.coreutils}/bin/cat "$_PIDFILE")"
+      _OLD_PID="''${_OLD_PID%% *}"  # strip start time if present
+      if [[ -n "$_OLD_PID" ]] && kill -0 "$_OLD_PID" 2>/dev/null; then
+        echo "ocsb-hermes: --replace: killing sandbox pid=$_OLD_PID" >&2
+        kill "$_OLD_PID"
+        # Wait for it to die (up to 5s).
+        for ((_i=0; _i<50; _i++)); do
+          kill -0 "$_OLD_PID" 2>/dev/null || break
+          ${pkgs.coreutils}/bin/sleep 0.1
+        done
+      fi
+    fi
+    # Force --continue so we reuse the same persist state.
+    FILTERED_ARGS=(--continue "''${FILTERED_ARGS[@]}")
+  fi
+
   # Default to --continue: Hermes runtime state is in $PERSIST_DIR,
   # workspace marker is only for strategy bookkeeping.
   if [[ "$HAS_CONTINUE_OR_OVERWRITE" -eq 0 ]]; then
@@ -332,6 +389,8 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
   # Keep workspace/chroot state under stable persist dir instead of
   # ~/.cache/ocsb/<project-hash>/hermes-agent.
   export OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"
+  export OCSB_HERMES_NO_GATEWAY="$NO_GATEWAY"
+  append_forward_env_name OCSB_HERMES_NO_GATEWAY
 
   exec ${mkHermesAgentSandboxBase}/bin/hermes-agent \
     --ro "$API_KEYS_ENV_FILE_HOST:$API_KEYS_ENV_FILE_SANDBOX" \

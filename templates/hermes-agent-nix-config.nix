@@ -18,6 +18,16 @@
       # --- hermes init (dirs + config.yaml) ---
       ${hermesInit}
 
+      # --- persistent venv for Python packages ---
+      _HERMES_VENV="$HOME/.hermes-venv"
+      if [[ ! -d "$_HERMES_VENV" ]]; then
+        python3 -m venv "$_HERMES_VENV"
+        "$_HERMES_VENV/bin/pip" install --quiet --upgrade pip
+      fi
+      _VENV_SITE=$("$_HERMES_VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')
+      export PYTHONPATH="$_VENV_SITE''${PYTHONPATH:+:$PYTHONPATH}"
+      export PATH="$_HERMES_VENV/bin:$PATH"
+
       # --- nix config ---
       mkdir -p "$HOME/.config/nix"
       cat > "$HOME/.config/nix/nix.conf" <<EOF
@@ -40,6 +50,14 @@
           exit 1
         fi
         source "$_API_KEYS_FILE"
+      fi
+
+      # --- start gateway in background (unless --no-gateway) ---
+      if [[ "''${OCSB_HERMES_NO_GATEWAY:-0}" != "1" ]]; then
+        setsid hermes gateway run --replace \
+          > "$HERMES_HOME/logs/gateway.log" 2>&1 &
+        echo "[ocsb] gateway started (pid $!)" >&2
+        trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT
       fi
     '';
   };
@@ -80,5 +98,6 @@
   env = {
     LANG = "C.UTF-8";
     EDITOR = "cat";
+    OCSB_HERMES_NO_GATEWAY = "0";
   };
 }

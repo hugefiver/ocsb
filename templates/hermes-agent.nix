@@ -17,6 +17,19 @@
       mkdir -p "$HOME/.config/nix"
       mkdir -p "$HERMES_HOME" "$MESSAGING_CWD" "$HERMES_HOME/cron" "$HERMES_HOME/sessions" "$HERMES_HOME/logs" "$HERMES_HOME/memories" "$HERMES_HOME/plugins"
 
+      # --- persistent venv for Python packages ---
+      # Persisted in $HOME so it survives workspace resets.
+      # Hermes can `pip install` runtime dependencies into it;
+      # PYTHONPATH ensures they're importable without modifying the Nix closure.
+      _HERMES_VENV="$HOME/.hermes-venv"
+      if [[ ! -d "$_HERMES_VENV" ]]; then
+        python3 -m venv "$_HERMES_VENV"
+        "$_HERMES_VENV/bin/pip" install --quiet --upgrade pip
+      fi
+      _VENV_SITE=$("$_HERMES_VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')
+      export PYTHONPATH="$_VENV_SITE''${PYTHONPATH:+:$PYTHONPATH}"
+      export PATH="$_HERMES_VENV/bin:$PATH"
+
       if [[ ! -f "$HERMES_HOME/config.yaml" ]]; then
         cat > "$HERMES_HOME/config.yaml" <<EOF
       messaging:
@@ -44,6 +57,14 @@
       warn-dirty = false
       accept-flake-config = true
       EOF
+
+      # --- start gateway in background (unless --no-gateway) ---
+      if [[ "''${OCSB_HERMES_NO_GATEWAY:-0}" != "1" ]]; then
+        setsid hermes gateway run --replace \
+          > "$HERMES_HOME/logs/gateway.log" 2>&1 &
+        echo "[ocsb] gateway started (pid $!)" >&2
+        trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT
+      fi
     '';
   };
 
@@ -88,5 +109,6 @@
   env = {
     LANG = "C.UTF-8";
     EDITOR = "cat";
+    OCSB_HERMES_NO_GATEWAY = "0";
   };
 }
