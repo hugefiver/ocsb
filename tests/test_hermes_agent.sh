@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WRAPPER="${1:?Usage: $0 <path-to-ocsb-hermes-agent-binary>}"
+WRAPPER="${1:?Usage: $0 <path-to-ocsb-hermes-binary>}"
 TMPDIR="$(mktemp -d)"
 PERSIST_MAIN="$TMPDIR/persist-main"
 PERSIST_EXTERNAL="$TMPDIR/persist-external"

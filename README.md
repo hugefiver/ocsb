@@ -16,7 +16,7 @@
 | 命令 | 说明 |
 |---|---|
 | `nix run github:hugefiver/ocsb` | 默认：交互 bash + opencode 配置 |
-| `nix run github:hugefiver/ocsb#ocsb-hermes-agent` | Hermes Agent（上游 flake `packages.<system>.default`） |
+| `nix run github:hugefiver/ocsb#hermes-agent-sandbox` | Hermes Agent（上游 flake `packages.<system>.default`） |
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox` | Ironclaw 最新版（v0.28.2），自带 postgres18 + pgvector |
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_1` | Ironclaw v0.28.1 |
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_27_0` | Ironclaw v0.27.0 |
@@ -181,18 +181,18 @@ Hermes Agent wrapper 使用上游 flake 的 `packages.<system>.default`，并让
 
 ```bash
 # 推荐先配置二进制缓存（见 快速开始 > 二进制缓存），避免首次构建 Hermes Agent
-nix run github:hugefiver/ocsb#ocsb-hermes-agent
+nix run github:hugefiver/ocsb#hermes-agent-sandbox
 
 # 也可通过 nix profile install 安装到系统
-nix profile install github:hugefiver/ocsb#ocsb-hermes-agent
-# 安装后二进制名为 ocsb-hermes-agent
+nix profile install github:hugefiver/ocsb#hermes-agent-sandbox
+# 安装后二进制名为 ocsb-hermes
 ```
 
 ### 版本切换
 
 ```bash
 # 使用特定版本的上游 Hermes Agent（override-input 方式）
-nix run github:hugefiver/ocsb#ocsb-hermes-agent \
+nix run github:hugefiver/ocsb#hermes-agent-sandbox \
   --override-input hermes-agent github:NousResearch/hermes-agent/v2025.12.1
 
 # 裸上游 Hermes Agent（不经 ocsb 包装，直接运行上游 flake 默认输出）
@@ -354,7 +354,7 @@ nix build .#checks.x86_64-linux.dual-layer-test
 Hermes/Ironclaw 等外部应用 wrapper 的完整构建与缓存由 CI/Cachix 负责；本地只在已有外部构建产物时运行对应 wrapper 测试，例如：
 
 ```bash
-bash tests/test_hermes_agent.sh /path/to/ocsb-hermes-agent
+bash tests/test_hermes_agent.sh /path/to/ocsb-hermes
 
 bash tests/test_ironclaw.sh /path/to/ocsb-ironclaw
 ```

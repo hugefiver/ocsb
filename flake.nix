@@ -83,7 +83,7 @@
             inherit pkgs hermesAgentPackage;
           });
 
-          mkHermesAgentSandboxBin = pkgs.writeShellScriptBin "ocsb-hermes-agent" ''
+          mkHermesAgentSandboxBin = pkgs.writeShellScriptBin "ocsb-hermes" ''
             set -euo pipefail
 
             API_KEYS_ENV_FILE_SANDBOX="/tmp/ocsb-hermes-agent-api-keys.env"
@@ -96,7 +96,7 @@
 
             usage() {
               cat <<USAGE_EOF
-            Usage: ocsb-hermes-agent [OPTIONS] [-- COMMAND...]
+            Usage: ocsb-hermes [OPTIONS] [-- COMMAND...]
 
             Run Hermes Agent inside an isolated ocsb sandbox with persistent home/state.
 
@@ -287,7 +287,7 @@ USAGE_EOF
                   exit 0
                   ;;
                 -w|--workspace)
-                  [[ $# -ge 2 ]] || { echo "ocsb-hermes-agent: $1 requires a value" >&2; exit 1; }
+                  [[ $# -ge 2 ]] || { echo "ocsb-hermes: $1 requires a value" >&2; exit 1; }
                   FILTERED_ARGS+=("$1" "$2")
                   shift 2
                   ;;
@@ -301,17 +301,17 @@ USAGE_EOF
                   shift
                   ;;
                 --persist-dir)
-                  [[ $# -ge 2 ]] || { echo "ocsb-hermes-agent: $1 requires a value" >&2; exit 1; }
+                  [[ $# -ge 2 ]] || { echo "ocsb-hermes: $1 requires a value" >&2; exit 1; }
                   PERSIST_DIR="$2"
                   shift 2
                   ;;
                 --api-keys-env-file)
-                  [[ $# -ge 2 ]] || { echo "ocsb-hermes-agent: $1 requires a value" >&2; exit 1; }
+                  [[ $# -ge 2 ]] || { echo "ocsb-hermes: $1 requires a value" >&2; exit 1; }
                   API_KEYS_ENV_FILE_HOST="$2"
                   shift 2
                   ;;
                 --env)
-                  [[ $# -ge 2 ]] || { echo "ocsb-hermes-agent: $1 requires NAME or NAME=VALUE" >&2; exit 1; }
+                  [[ $# -ge 2 ]] || { echo "ocsb-hermes: $1 requires NAME or NAME=VALUE" >&2; exit 1; }
                   _ENV_SPEC="$2"
                   if [[ "$_ENV_SPEC" == *=* ]]; then
                     _ENV_NAME="''${_ENV_SPEC%%=*}"
@@ -319,21 +319,21 @@ USAGE_EOF
                   else
                     _ENV_NAME="$_ENV_SPEC"
                     if [[ ! "$_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-                      echo "ocsb-hermes-agent: invalid --env name: $_ENV_NAME" >&2
+                      echo "ocsb-hermes: invalid --env name: $_ENV_NAME" >&2
                       exit 1
                     fi
                     if [[ -z "''${!_ENV_NAME+x}" ]]; then
-                      echo "ocsb-hermes-agent: --env $_ENV_NAME requested but host environment variable is unset" >&2
+                      echo "ocsb-hermes: --env $_ENV_NAME requested but host environment variable is unset" >&2
                       exit 1
                     fi
                     _ENV_VALUE="''${!_ENV_NAME}"
                   fi
                   if [[ ! "$_ENV_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-                    echo "ocsb-hermes-agent: invalid --env name: $_ENV_NAME" >&2
+                    echo "ocsb-hermes: invalid --env name: $_ENV_NAME" >&2
                     exit 1
                   fi
                   if is_reserved_hermes_env_name "$_ENV_NAME"; then
-                    echo "ocsb-hermes-agent: --env $_ENV_NAME is reserved for the Hermes Agent wrapper" >&2
+                    echo "ocsb-hermes: --env $_ENV_NAME is reserved for the Hermes Agent wrapper" >&2
                     exit 1
                   fi
 
@@ -384,12 +384,12 @@ USAGE_EOF
 
             if [[ -n "$API_KEYS_ENV_FILE_HOST" ]]; then
               if [[ ! -r "$API_KEYS_ENV_FILE_HOST" ]]; then
-                echo "ocsb-hermes-agent: --api-keys-env-file must be readable: $API_KEYS_ENV_FILE_HOST" >&2
+                echo "ocsb-hermes: --api-keys-env-file must be readable: $API_KEYS_ENV_FILE_HOST" >&2
                 exit 1
               fi
               API_KEYS_ENV_FILE_HOST="$(${pkgs.coreutils}/bin/realpath -m "$API_KEYS_ENV_FILE_HOST")"
               if [[ ! -r "$API_KEYS_ENV_FILE_HOST" ]]; then
-                echo "ocsb-hermes-agent: --api-keys-env-file must resolve to a readable file: $API_KEYS_ENV_FILE_HOST" >&2
+                echo "ocsb-hermes: --api-keys-env-file must resolve to a readable file: $API_KEYS_ENV_FILE_HOST" >&2
                 exit 1
               fi
             else
@@ -966,7 +966,7 @@ EOF
           default = mkSandbox (import ./templates/opencode.nix { inherit pkgs; });
 
           hermes-agent = hermesAgentPackage;
-          ocsb-hermes-agent = mkHermesAgentSandboxBin;
+          hermes-agent-sandbox = mkHermesAgentSandboxBin;
 
           # Aliases pointing at the latest tracked release (baseline arch).
           ironclaw = latestPkg;
