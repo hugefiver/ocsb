@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
 **Branch:** master
-**Scope:** ocsb sandbox framework, Nix flake packaging, wrapper tests
+**Scope:** ocsb sandbox framework, Nix flake packaging, Hermes/Ironclaw wrappers, regression tests
 
 ## OVERVIEW
 
@@ -11,12 +11,12 @@ ocsb is a Nix sandbox framework with bubblewrap as the default runtime backend a
 
 ```text
 ./
-├── flake.nix              # package/check outputs, Ironclaw wrapper matrix
+├── flake.nix              # package/check outputs, Hermes + Ironclaw wrappers
 ├── lib/mkSandbox.nix      # generated ocsb launcher and runtime state logic
 ├── modules/               # Nix module options for app/env/mounts/network/workspace/backend/experimental
-├── templates/             # app presets: OpenCode and Ironclaw
+├── templates/             # app presets: OpenCode, Hermes Agent, Ironclaw
 ├── pkgs/ironclaw.nix      # Ironclaw Rust package derivation and fixed-output deps
-├── tests/test_*.sh        # wrapper, strategy, network, and Ironclaw regression tests
+├── tests/test_*.sh        # wrapper, strategy, network, Hermes, and Ironclaw regression tests
 └── README.md              # user-facing usage and operations docs
 ```
 
@@ -29,6 +29,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 | Change runtime launcher behavior | `lib/mkSandbox.nix` | Generated shell script; verify with wrapper tests. |
 | Add/change options | `modules/*.nix` | Keep README and tests in sync. |
 | Change runtime backend support | `modules/backend.nix`, `lib/mkSandbox.nix`, `tests/test_backend.sh` | Preserve bubblewrap default and explicit non-bwrap support boundaries. |
+| Change Hermes Agent sandbox | `flake.nix`, `templates/hermes-agent.nix`, `tests/test_hermes_agent.sh` | Wrapper owns persist dir, secret env file delivery, and state redirection. |
 | Change Ironclaw sandbox | `flake.nix`, `templates/ironclaw.nix`, `tests/test_ironclaw.sh` | Wrapper owns persist dir and state redirection. |
 | Change `/nix/store` mode | `lib/mkSandbox.nix`, `modules/experimental.nix` | Do not reintroduce overlayfs on `/nix/store`. |
 | Change workspace strategies | `lib/mkSandbox.nix`, `tests/test_wrapper.sh`, strategy-specific tests | Keep state layout and cleanup covered. |
@@ -67,6 +68,19 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 - Ironclaw network is host (`network.enable = null`) because PostgreSQL must not run as uid 0, while filtered slirp currently needs uid 0 inside the user namespace.
 - Ironclaw preExec initializes PostgreSQL 18 + pgvector in embedded mode; external/sidecar modes source a private mounted DB env file, then set `IRONCLAW_DATA_DIR` and persist `SECRETS_MASTER_KEY` in app data.
 
+## HERMES AGENT CONTRACT
+
+- Hermes package source is upstream flake output `hermes-agent.packages.${system}.default`; its `nixpkgs` input follows ocsb's root `nixpkgs`; do NOT import/evaluate upstream `nixosModules.default` into ocsb modules.
+- Wrapper binary is `ocsb-hermes-agent`; flake package alias is `hermes-agent-sandbox`.
+- Default persist dir is `~/.cache/ocsb/hermes-agent/`; override via `OCSB_HERMES_AGENT_PERSIST_DIR` or `--persist-dir`.
+- Wrapper must `cd "$PERSIST_DIR/home"` before launching the inner sandbox and export `OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"`, so direct workspace maps `$PERSIST_DIR/home` to `/home/sandbox`; do not create a separate persist `workspace/` tree.
+- Hermes API/provider secrets are delivered via private env file (`$PERSIST_DIR/state/hermes-agent-api-keys.env`, 0600, atomic temp+mv) mounted read-only into sandbox; automatic capture is limited to a curated Hermes/provider allowlist, while extra secret-like names require explicit `--env NAME[=VALUE]`. Secret names must not be forwarded as inner `--env` argv or retained in `OCSB_FORWARD_ENV`.
+- `--api-keys-env-file FILE` uses caller-provided readable file as-is (read-only mount, no rewrite), surfaced in sandbox through `OCSB_HERMES_AGENT_API_KEYS_ENV_FILE`.
+- Wrapper-reserved env names (`OCSB_HERMES_AGENT_PERSIST_DIR`, `OCSB_HERMES_AGENT_API_KEYS_ENV_FILE`, `HERMES_HOME`, `HERMES_MANAGED`, `MESSAGING_CWD`) must be rejected for `--env ...` with error text mentioning “reserved for the Hermes Agent wrapper”.
+- Hermes template runs as non-root, sets `HERMES_HOME=/home/sandbox/.hermes`, `HERMES_MANAGED=true`, `MESSAGING_CWD=/home/sandbox`, initializes minimal config only when absent, and has no DB/Postgres/sidecar behavior.
+- Hermes network mode is host (`network.enable = null`) because Hermes runs non-root while filtered slirp currently needs uid 0 inside the user namespace. Workspace strategy is direct on `/home/sandbox`.
+- CI builds `.#packages.x86_64-linux.hermes-agent-sandbox` on master/workflow_dispatch and pushes its closure to Cachix.
+
 ## CONVENTIONS
 
 - Commit messages are English semantic style: `fix(sandbox): ...`, `docs(sandbox): ...`, `test(sandbox): ...`.
@@ -83,9 +97,12 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 - Do not remove legacy layout cleanup without replacing tests.
 - Do not split implementation changes from their shell regression tests when committing.
 - Do not install local tooling just to run checks; use existing Nix/dev tools or remote Linux verification.
-- Do not build the Ironclaw Rust package (`pkgs/ironclaw.nix`) during local development; it is time-consuming and not needed to validate wrapper/template/test changes. Use `nix flake check --no-build` and `nix build .#packages.x86_64-linux.default` (which builds only the ocsb wrapper, not Ironclaw) for script-level verification. Only build `.#ironclaw-sandbox` or `.#ironclaw-sandbox_x86_64_v3` when explicitly requested or on CI.
+- Do not add Ironclaw-style DB/sidecar/version/arch complexity to Hermes support.
+- Do not compile external application payloads during local development: Hermes Agent, Ironclaw, retained Ironclaw versions, arch variants, or similar upstream programs. Focus local validation on ocsb itself: `nix flake check --no-build`, `nix build .#packages.x86_64-linux.default`, script syntax checks, wrapper source inspection, and tests that do not trigger external package builds. External app builds belong on CI/Cachix, not local dev.
 
 ## VERIFICATION GATES
+
+Local ocsb verification only:
 
 ```bash
 nix flake check --no-build
@@ -98,6 +115,13 @@ bash tests/test_btrfs.sh ./result/bin/ocsb     # may SKIP without btrfs perms
 
 nix build .#checks.x86_64-linux.net-test
 nix build .#checks.x86_64-linux.dual-layer-test
+```
+
+External app wrapper checks are CI/Cachix responsibilities, or can run only against an already-built wrapper supplied outside local development. Do not run these `nix build` commands locally while developing ocsb:
+
+```bash
+nix build .#hermes-agent-sandbox
+bash tests/test_hermes_agent.sh ./result/bin/ocsb-hermes-agent
 
 nix build .#ironclaw-sandbox
 bash tests/test_ironclaw.sh ./result/bin/ocsb-ironclaw
