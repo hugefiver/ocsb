@@ -104,6 +104,11 @@ if [[ ! -f "/home/sandbox/.hermes/config.yaml" ]]; then
   echo "missing /home/sandbox/.hermes/config.yaml" >&2
   exit 1
 fi
+
+if [[ ! -d "/home/sandbox/.hermes/cron" ]]; then
+  echo "missing /home/sandbox/.hermes/cron" >&2
+  exit 1
+fi
 EOF
 chmod +x "$PROBE_SCRIPT"
 OCSB_EXEC_OVERRIDE=1 "$WRAPPER" --strategy direct --continue --persist-dir "$PERSIST_MAIN" -- bash /home/sandbox/hermes-probe.sh "$EXPECTED_STATE_DIR"

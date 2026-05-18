@@ -242,7 +242,7 @@ USAGE_EOF
                 if is_default_hermes_api_key_env_name "$_api_env_name" && [[ -n "''${!_api_env_name+x}" ]]; then
                   append_api_key_env_name "$_api_env_name"
                 fi
-              done < <(compgen -e | ${pkgs.coreutils}/bin/sort -u)
+              done < <(${pkgs.coreutils}/bin/env | ${pkgs.coreutils}/bin/cut -d= -f1 | ${pkgs.coreutils}/bin/sort -u)
             }
 
             write_api_keys_env_file() {
@@ -277,7 +277,7 @@ USAGE_EOF
                   unset "$_name" 2>/dev/null || true
                   remove_forward_env_name "$_name"
                 fi
-              done < <(compgen -e | ${pkgs.coreutils}/bin/sort -u)
+              done < <(${pkgs.coreutils}/bin/env | ${pkgs.coreutils}/bin/cut -d= -f1 | ${pkgs.coreutils}/bin/sort -u)
             }
 
             while [[ $# -gt 0 ]]; do
@@ -966,7 +966,7 @@ EOF
           default = mkSandbox (import ./templates/opencode.nix { inherit pkgs; });
 
           hermes-agent = hermesAgentPackage;
-          hermes-agent-sandbox = mkHermesAgentSandboxBin;
+          ocsb-hermes-agent = mkHermesAgentSandboxBin;
 
           # Aliases pointing at the latest tracked release (baseline arch).
           ironclaw = latestPkg;

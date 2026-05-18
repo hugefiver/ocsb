@@ -71,7 +71,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 ## HERMES AGENT CONTRACT
 
 - Hermes package source is upstream flake output `hermes-agent.packages.${system}.default`; its `nixpkgs` input follows ocsb's root `nixpkgs`; do NOT import/evaluate upstream `nixosModules.default` into ocsb modules.
-- Wrapper binary is `ocsb-hermes-agent`; flake package alias is `hermes-agent-sandbox`.
+- Wrapper binary is `ocsb-hermes-agent`; flake package alias is `ocsb-hermes-agent`.
 - Default persist dir is `~/.cache/ocsb/hermes-agent/`; override via `OCSB_HERMES_AGENT_PERSIST_DIR` or `--persist-dir`.
 - Wrapper must `cd "$PERSIST_DIR/home"` before launching the inner sandbox and export `OCSB_STATE_BASE_DIR="$PERSIST_DIR/state"`, so direct workspace maps `$PERSIST_DIR/home` to `/home/sandbox`; do not create a separate persist `workspace/` tree.
 - Hermes API/provider secrets are delivered via private env file (`$PERSIST_DIR/state/hermes-agent-api-keys.env`, 0600, atomic temp+mv) mounted read-only into sandbox; automatic capture is limited to a curated Hermes/provider allowlist, while extra secret-like names require explicit `--env NAME[=VALUE]`. Secret names must not be forwarded as inner `--env` argv or retained in `OCSB_FORWARD_ENV`.
@@ -79,7 +79,7 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 - Wrapper-reserved env names (`OCSB_HERMES_AGENT_PERSIST_DIR`, `OCSB_HERMES_AGENT_API_KEYS_ENV_FILE`, `HERMES_HOME`, `HERMES_MANAGED`, `MESSAGING_CWD`) must be rejected for `--env ...` with error text mentioning “reserved for the Hermes Agent wrapper”.
 - Hermes template runs as non-root, sets `HERMES_HOME=/home/sandbox/.hermes`, `HERMES_MANAGED=true`, `MESSAGING_CWD=/home/sandbox`, initializes minimal config only when absent, and has no DB/Postgres/sidecar behavior.
 - Hermes network mode is host (`network.enable = null`) because Hermes runs non-root while filtered slirp currently needs uid 0 inside the user namespace. Workspace strategy is direct on `/home/sandbox`.
-- CI builds `.#packages.x86_64-linux.hermes-agent-sandbox` on master/workflow_dispatch and pushes its closure to Cachix.
+- CI builds `.#packages.x86_64-linux.ocsb-hermes-agent` on master/workflow_dispatch and pushes its closure to Cachix.
 
 ## CONVENTIONS
 
@@ -120,7 +120,7 @@ nix build .#checks.x86_64-linux.dual-layer-test
 External app wrapper checks are CI/Cachix responsibilities, or can run only against an already-built wrapper supplied outside local development. Do not run these `nix build` commands locally while developing ocsb:
 
 ```bash
-nix build .#hermes-agent-sandbox
+nix build .#ocsb-hermes-agent
 bash tests/test_hermes_agent.sh ./result/bin/ocsb-hermes-agent
 
 nix build .#ironclaw-sandbox
