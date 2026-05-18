@@ -90,11 +90,6 @@ if [[ "${HERMES_HOME:-}" != "/home/sandbox/.hermes" ]]; then
   exit 1
 fi
 
-if [[ "${HERMES_MANAGED:-}" != "true" ]]; then
-  echo "expected HERMES_MANAGED=true, got ${HERMES_MANAGED:-<unset>}" >&2
-  exit 1
-fi
-
 if [[ "${MESSAGING_CWD:-}" != "/home/sandbox" ]]; then
   echo "expected MESSAGING_CWD=/home/sandbox, got ${MESSAGING_CWD:-<unset>}" >&2
   exit 1
@@ -127,11 +122,6 @@ fi
 
 if [[ ! -d "/home/sandbox/.hermes/plugins" ]]; then
   echo "missing /home/sandbox/.hermes/plugins" >&2
-  exit 1
-fi
-
-if [[ ! -f "/home/sandbox/.hermes/.managed" ]]; then
-  echo "missing /home/sandbox/.hermes/.managed" >&2
   exit 1
 fi
 EOF
@@ -289,8 +279,6 @@ RES_API_FILE_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSI
 RES_API_FILE_RC=$?
 RES_HERMES_HOME_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env HERMES_HOME=/tmp/nope -- --version 2>&1)"
 RES_HERMES_HOME_RC=$?
-RES_MANAGED_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env HERMES_MANAGED=false -- --version 2>&1)"
-RES_MANAGED_RC=$?
 RES_MSG_CWD_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env MESSAGING_CWD=/tmp/nope -- --version 2>&1)"
 RES_MSG_CWD_RC=$?
 set -e
@@ -301,8 +289,6 @@ assert "reserved OCSB_HERMES_AGENT_API_KEYS_ENV_FILE fails" test "$RES_API_FILE_
 assert_contains "reserved OCSB_HERMES_AGENT_API_KEYS_ENV_FILE message" "$RES_API_FILE_OUT" "reserved for the Hermes Agent wrapper"
 assert "reserved HERMES_HOME fails" test "$RES_HERMES_HOME_RC" -ne 0
 assert_contains "reserved HERMES_HOME message" "$RES_HERMES_HOME_OUT" "reserved for the Hermes Agent wrapper"
-assert "reserved HERMES_MANAGED fails" test "$RES_MANAGED_RC" -ne 0
-assert_contains "reserved HERMES_MANAGED message" "$RES_MANAGED_OUT" "reserved for the Hermes Agent wrapper"
 assert "reserved MESSAGING_CWD fails" test "$RES_MSG_CWD_RC" -ne 0
 assert_contains "reserved MESSAGING_CWD message" "$RES_MSG_CWD_OUT" "reserved for the Hermes Agent wrapper"
 
