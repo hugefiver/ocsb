@@ -47,6 +47,7 @@
       messaging:
         cwd: /home/sandbox
 EOF
+      fi
 
       # --- api keys ---
       _API_KEYS_FILE="''${OCSB_HERMES_AGENT_API_KEYS_ENV_FILE:-}"

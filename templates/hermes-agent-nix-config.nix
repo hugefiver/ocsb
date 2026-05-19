@@ -53,6 +53,16 @@
       warn-dirty = false
       accept-flake-config = true
 EOF
+
+      # --- api keys ---
+      _API_KEYS_FILE="''${OCSB_HERMES_AGENT_API_KEYS_ENV_FILE:-}"
+      if [[ -n "$_API_KEYS_FILE" ]]; then
+        if [[ ! -r "$_API_KEYS_FILE" ]]; then
+          echo "[hermes-agent] OCSB_HERMES_AGENT_API_KEYS_ENV_FILE is not readable: $_API_KEYS_FILE" >&2
+          exit 1
+        fi
+        source "$_API_KEYS_FILE"
+      fi
     '';
   };
 
