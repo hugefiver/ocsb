@@ -88,6 +88,9 @@ let
     else pkgs.writeShellScript "${cfg.app.name}-supervisor" ''
       set -euo pipefail
 
+      export HERMES_HOME="$HOME/.hermes"
+      export MESSAGING_CWD="/home/sandbox"
+
       _CONTROL_FIFO="''${OCSB_STATE_DIR:-/tmp}/.ocsb-cmd"
       _FOREGROUND_PID=""
       _DAEMON_PIDS=()
@@ -140,6 +143,7 @@ let
 
       # Listen for replacement commands.
       rm -f "$_CONTROL_FIFO"
+      ${pkgs.coreutils}/bin/mkdir -p "$(dirname "$_CONTROL_FIFO")"
       ${pkgs.coreutils}/bin/mkfifo "$_CONTROL_FIFO" || true
       while IFS= read -r _line < "$_CONTROL_FIFO"; do
         [[ -n "$_line" ]] || continue

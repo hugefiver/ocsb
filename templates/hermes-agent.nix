@@ -69,7 +69,7 @@ EOF
       cores = 0
       warn-dirty = false
       accept-flake-config = true
-      EOF
+EOF
     '';
   };
 
