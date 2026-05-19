@@ -60,10 +60,11 @@
 
       # --- start gateway in background (unless --no-gateway) ---
       if [[ "''${OCSB_HERMES_NO_GATEWAY:-0}" != "1" ]]; then
-        setsid hermes gateway run --replace \
+        hermes gateway run --replace \
           > "$HERMES_HOME/logs/gateway.log" 2>&1 &
-        echo "[ocsb] gateway started (pid $!)" >&2
-        trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT
+        _GW_PID=$!
+        disown $_GW_PID
+        echo "[ocsb] gateway started (pid $_GW_PID)" >&2
       fi
     '';
   };
@@ -85,6 +86,7 @@
     python3
     nix
     cacert
+    procps
   ];
 
   mounts.rw = [];
