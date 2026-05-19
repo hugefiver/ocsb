@@ -92,6 +92,16 @@ let
       : ''${MESSAGING_CWD:=/home/sandbox}
       export HERMES_HOME MESSAGING_CWD
 
+      # persistent venv — create if missing, inject PYTHONPATH / PATH
+      _VENV="$HOME/.hermes-venv"
+      if [[ ! -d "$_VENV" ]]; then
+        ${pkgs.python3}/bin/python3 -m venv "$_VENV"
+        "$_VENV/bin/pip" install --quiet --upgrade pip
+      fi
+      _VENV_SITE=$("$_VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')
+      export PYTHONPATH="$_VENV_SITE''${PYTHONPATH:+:$PYTHONPATH}"
+      export PATH="$_VENV/bin:$PATH"
+
       _DAEMON_PIDS=()
 
       spawn_daemon() {
