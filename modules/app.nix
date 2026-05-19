@@ -79,9 +79,8 @@
         supported.
       '';
     };
-  };
 
-  daemon = lib.mkOption {
+    daemon = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule ({ ... }: {
         options = {
           command = lib.mkOption {
@@ -105,5 +104,4 @@
       '';
     };
   };
-
 }

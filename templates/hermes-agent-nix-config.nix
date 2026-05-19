@@ -1,4 +1,4 @@
-{ pkgs, hermesAgentPackage, hermesInit ? pkgs.callPackage ../lib/hermes-config.nix { } }:
+{ pkgs, hermesAgentPackage, hermesInit ? (pkgs.callPackage ../lib/hermes-config.nix { }) { } }:
 
 { ... }:
 
