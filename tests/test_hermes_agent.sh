@@ -281,6 +281,8 @@ RES_HERMES_HOME_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PE
 RES_HERMES_HOME_RC=$?
 RES_MSG_CWD_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env MESSAGING_CWD=/tmp/nope -- --version 2>&1)"
 RES_MSG_CWD_RC=$?
+RES_NO_GATEWAY_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env OCSB_HERMES_NO_GATEWAY=1 -- --version 2>&1)"
+RES_NO_GATEWAY_RC=$?
 set -e
 
 assert "reserved OCSB_HERMES_AGENT_PERSIST_DIR fails" test "$RES_PERSIST_RC" -ne 0
@@ -291,6 +293,8 @@ assert "reserved HERMES_HOME fails" test "$RES_HERMES_HOME_RC" -ne 0
 assert_contains "reserved HERMES_HOME message" "$RES_HERMES_HOME_OUT" "reserved for the Hermes Agent wrapper"
 assert "reserved MESSAGING_CWD fails" test "$RES_MSG_CWD_RC" -ne 0
 assert_contains "reserved MESSAGING_CWD message" "$RES_MSG_CWD_OUT" "reserved for the Hermes Agent wrapper"
+assert "reserved OCSB_HERMES_NO_GATEWAY fails" test "$RES_NO_GATEWAY_RC" -ne 0
+assert_contains "reserved OCSB_HERMES_NO_GATEWAY message" "$RES_NO_GATEWAY_OUT" "reserved for the Hermes Agent wrapper"
 
 echo ""
 echo "=== hermes-agent Results: $PASS passed, $FAIL failed ==="

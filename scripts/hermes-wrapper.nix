@@ -95,7 +95,7 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
 
   is_reserved_hermes_env_name() {
     case "$1" in
-      OCSB_HERMES_AGENT_PERSIST_DIR|OCSB_HERMES_AGENT_API_KEYS_ENV_FILE|HERMES_HOME|MESSAGING_CWD)
+      OCSB_HERMES_AGENT_PERSIST_DIR|OCSB_HERMES_AGENT_API_KEYS_ENV_FILE|OCSB_HERMES_NO_GATEWAY|HERMES_HOME|MESSAGING_CWD)
         return 0
         ;;
       *)
@@ -342,6 +342,7 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
     fi
     # Force --continue so we reuse the same persist state.
     FILTERED_ARGS=(--continue "''${FILTERED_ARGS[@]}")
+    HAS_CONTINUE_OR_OVERWRITE=1
   fi
 
   # Default to --continue: Hermes runtime state is in $PERSIST_DIR,

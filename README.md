@@ -232,7 +232,7 @@ Hermes wrapper 不会创建独立 `$PERSIST_DIR/workspace`。
 - 该文件只读挂载到沙箱 `/tmp/ocsb-hermes-agent-api-keys.env`，模板 preExec 再 `source`
 - 指定 `--api-keys-env-file FILE` 时，仅校验可读并只读挂载；wrapper 不重写 caller 文件
 - secret env 不通过 inner `ocsb --env` argv 下传，也会从 `OCSB_FORWARD_ENV` 中清理
-- `--env` 禁止覆盖以下内部保留名（报错包含 "reserved for the Hermes Agent wrapper"）：`OCSB_HERMES_AGENT_PERSIST_DIR`、`OCSB_HERMES_AGENT_API_KEYS_ENV_FILE`、`HERMES_HOME`、`MESSAGING_CWD`
+- `--env` 禁止覆盖以下内部保留名（报错包含 "reserved for the Hermes Agent wrapper"）：`OCSB_HERMES_AGENT_PERSIST_DIR`、`OCSB_HERMES_AGENT_API_KEYS_ENV_FILE`、`OCSB_HERMES_NO_GATEWAY`、`HERMES_HOME`、`MESSAGING_CWD`
 
 ### 运行时约定
 
