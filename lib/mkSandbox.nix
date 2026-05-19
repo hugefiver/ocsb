@@ -45,6 +45,7 @@ let
       ++ lib.optional (cfg.app.package != null) cfg.app.package
       ++ lib.optional (preExecScript != null) preExecScript
       ++ lib.optional (preExecScript == null) envCaptureScript
+      ++ lib.optional (daemonSupervisor != null) daemonSupervisor
       ++ lib.optional (networkMode == "filtered" && !dualLayerEnabled) networkSetupScript
       ++ lib.optional dualLayerEnabled sandboxShell
       ;
