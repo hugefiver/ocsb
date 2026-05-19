@@ -325,17 +325,22 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
       echo "ocsb-hermes: --replace requires --gateway" >&2
       exit 1
     fi
-    # Send replacement command to supervisor via control fifo.
-    # The supervisor (PID 1 inside bwrap) reads the command and
-    # hot-swaps the foreground process without tearing down the sandbox.
-    _FIFO="$PERSIST_DIR/state/hermes-agent/.ocsb-cmd"
-    if [[ ! -p "$_FIFO" ]]; then
-      echo "ocsb-hermes: --replace: no running sandbox (fifo $_FIFO not found)" >&2
-      exit 1
+    # Kill the running sandbox via pidfile, then restart with --continue.
+    _PIDFILE="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/hermes-agent.pid"
+    if [[ -f "$_PIDFILE" ]]; then
+      _OLD_PID="$(${pkgs.coreutils}/bin/cat "$_PIDFILE")"
+      _OLD_PID="''${_OLD_PID%% *}"
+      if [[ -n "$_OLD_PID" ]] && kill -0 "$_OLD_PID" 2>/dev/null; then
+        echo "ocsb-hermes: --replace: killing sandbox pid=$_OLD_PID" >&2
+        kill "$_OLD_PID"
+        for ((_i=0; _i<50; _i++)); do
+          kill -0 "$_OLD_PID" 2>/dev/null || break
+          ${pkgs.coreutils}/bin/sleep 0.1
+        done
+      fi
     fi
-    echo "hermes gateway run --replace" > "$_FIFO"
-    echo "ocsb-hermes: --replace: sent to supervisor, exiting" >&2
-    exit 0
+    FILTERED_ARGS=(--continue "''${FILTERED_ARGS[@]}")
+    HAS_CONTINUE_OR_OVERWRITE=1
   fi
 
   # Default to --continue: Hermes runtime state is in $PERSIST_DIR,

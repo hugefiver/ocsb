@@ -88,21 +88,11 @@ let
     else pkgs.writeShellScript "${cfg.app.name}-supervisor" ''
       set -euo pipefail
 
-      export HERMES_HOME="$HOME/.hermes"
-      export MESSAGING_CWD="/home/sandbox"
+      : ''${HERMES_HOME:=$HOME/.hermes}
+      : ''${MESSAGING_CWD:=/home/sandbox}
+      export HERMES_HOME MESSAGING_CWD
 
-      _CONTROL_FIFO="''${OCSB_STATE_DIR:-/tmp}/.ocsb-cmd"
-      _FOREGROUND_PID=""
       _DAEMON_PIDS=()
-
-      cleanup() {
-        for _pid in "''${_DAEMON_PIDS[@]+''${_DAEMON_PIDS[@]}}"; do
-          kill "$_pid" 2>/dev/null || true
-        done
-        kill "$_FOREGROUND_PID" 2>/dev/null || true
-        wait
-      }
-      trap cleanup EXIT
 
       spawn_daemon() {
         local _cmd="$1"
@@ -119,38 +109,12 @@ let
         done
       }
 
-      spawn_foreground() {
-        "$@" &
-        _FOREGROUND_PID=$!
-        echo "[ocsb] foreground started (pid $_FOREGROUND_PID)" >&2
-        wait "$_FOREGROUND_PID" 2>/dev/null || true
-      }
-
-      replace_foreground() {
-        kill "$_FOREGROUND_PID" 2>/dev/null || true
-        wait "$_FOREGROUND_PID" 2>/dev/null || true
-        spawn_foreground "$@"
-      }
-
-      # Start daemons.
       ${lib.concatMapStringsSep "\n      " (d: ''
       spawn_daemon ${lib.escapeShellArg d.command} ${lib.boolToString d.restart} &
       _DAEMON_PIDS+=($!)
       '') cfg.app.daemon}
 
-      # Start foreground app.
-      spawn_foreground "$@"
-
-      # Listen for replacement commands.
-      rm -f "$_CONTROL_FIFO"
-      ${pkgs.coreutils}/bin/mkdir -p "$(dirname "$_CONTROL_FIFO")"
-      ${pkgs.coreutils}/bin/mkfifo "$_CONTROL_FIFO" || true
-      while IFS= read -r _line < "$_CONTROL_FIFO"; do
-        [[ -n "$_line" ]] || continue
-        echo "[ocsb] supervisor: replacing with: $_line" >&2
-        eval "set -- $_line"
-        replace_foreground "$@"
-      done
+      exec "$@"
     '';
 
   # PATH inside sandbox: include app's bin dir if a package is configured,
