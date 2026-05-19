@@ -81,4 +81,29 @@
     };
   };
 
+  daemon = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule ({ ... }: {
+        options = {
+          command = lib.mkOption {
+            type = lib.types.str;
+            description = "Shell command to run as a background daemon inside the sandbox.";
+            example = "hermes gateway run --replace > $HERMES_HOME/logs/gateway.log 2>&1";
+          };
+          restart = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = "Automatically restart the daemon if it exits (non-zero or zero).";
+          };
+        };
+      }));
+      default = [];
+      description = ''
+        Background services managed by the sandbox supervisor (PID 1).
+        Each daemon is spawned before the foreground app and monitored
+        while the sandbox is alive. Use `restart = true` for crash-resistant
+        long-lived services like messaging gateways.
+      '';
+    };
+  };
+
 }

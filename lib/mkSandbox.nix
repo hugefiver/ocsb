@@ -79,6 +79,75 @@ let
   # Extra arguments passed to the app binary at startup.
   appArgs = lib.escapeShellArgs cfg.app.args;
 
+  # Daemon supervisor — generated when app.daemon is non-empty.
+  # Runs as PID 1 inside bwrap, managing daemon processes + foreground app.
+  daemonSupervisor =
+    if cfg.app.daemon == []
+    then null
+    else pkgs.writeShellScript "${cfg.app.name}-supervisor" ''
+      set -euo pipefail
+
+      _CONTROL_FIFO="''${OCSB_STATE_DIR:-/tmp}/.ocsb-cmd"
+      _FOREGROUND_PID=""
+      _DAEMON_PIDS=()
+
+      cleanup() {
+        for _pid in "''${_DAEMON_PIDS[@]+''${_DAEMON_PIDS[@]}}"; do
+          kill "$_pid" 2>/dev/null || true
+        done
+        kill "$_FOREGROUND_PID" 2>/dev/null || true
+        wait
+      }
+      trap cleanup EXIT
+
+      spawn_daemon() {
+        local _cmd="$1"
+        local _restart="$2"
+        local _pid
+        while true; do
+          eval "$_cmd" &
+          _pid=$!
+          echo "[ocsb] daemon started (pid $_pid): $_cmd" >&2
+          wait "$_pid" 2>/dev/null || true
+          echo "[ocsb] daemon exited (pid $_pid, rc=$?), cmd: $_cmd" >&2
+          [[ "$_restart" == "true" ]] || break
+          ${pkgs.coreutils}/bin/sleep 1
+        done
+      }
+
+      spawn_foreground() {
+        "$@" &
+        _FOREGROUND_PID=$!
+        echo "[ocsb] foreground started (pid $_FOREGROUND_PID)" >&2
+        wait "$_FOREGROUND_PID" 2>/dev/null || true
+      }
+
+      replace_foreground() {
+        kill "$_FOREGROUND_PID" 2>/dev/null || true
+        wait "$_FOREGROUND_PID" 2>/dev/null || true
+        spawn_foreground "$@"
+      }
+
+      # Start daemons.
+      ${lib.concatMapStringsSep "\n      " (d: ''
+      spawn_daemon ${lib.escapeShellArg d.command} ${lib.boolToString d.restart} &
+      _DAEMON_PIDS+=($!)
+      '') cfg.app.daemon}
+
+      # Start foreground app.
+      spawn_foreground "$@"
+
+      # Listen for replacement commands.
+      rm -f "$_CONTROL_FIFO"
+      ${pkgs.coreutils}/bin/mkfifo "$_CONTROL_FIFO" || true
+      while IFS= read -r _line < "$_CONTROL_FIFO"; do
+        [[ -n "$_line" ]] || continue
+        echo "[ocsb] supervisor: replacing with: $_line" >&2
+        eval "set -- $_line"
+        replace_foreground "$@"
+      done
+    '';
+
   # PATH inside sandbox: include app's bin dir if a package is configured,
   # plus common Nix profile locations so `nix profile install` binaries are
   # immediately callable in interactive sessions.
@@ -853,6 +922,9 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       '' else ''
       SANDBOX_CMD=(${envCaptureScript} "''${SANDBOX_CMD[@]}")
       ''}
+      ${if daemonSupervisor != null then ''
+      SANDBOX_CMD=(${daemonSupervisor} "''${SANDBOX_CMD[@]}")
+      '' else ""}
     }
 
     build_workspace_strategy_flags() {

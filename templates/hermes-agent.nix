@@ -8,6 +8,18 @@
     package = hermesAgentPackage;
     binPath = "bin/hermes";
     runAsRoot = false;
+    daemon = [
+      {
+        command = ''
+          if [[ "''${OCSB_HERMES_NO_GATEWAY:-0}" != "1" ]]; then
+            hermes gateway run --replace > "$HERMES_HOME/logs/gateway.log" 2>&1
+          else
+            exec ${pkgs.coreutils}/bin/sleep infinity
+          fi
+        '';
+        restart = true;
+      }
+    ];
     preExecHook = ''
       set -euo pipefail
 
@@ -34,9 +46,9 @@
         cat > "$HERMES_HOME/config.yaml" <<EOF
       messaging:
         cwd: /home/sandbox
-      EOF
-      fi
+EOF
 
+      # --- api keys ---
       _API_KEYS_FILE="''${OCSB_HERMES_AGENT_API_KEYS_ENV_FILE:-}"
       if [[ -n "$_API_KEYS_FILE" ]]; then
         if [[ ! -r "$_API_KEYS_FILE" ]]; then
@@ -57,15 +69,6 @@
       warn-dirty = false
       accept-flake-config = true
       EOF
-
-      # --- start gateway in background (unless --no-gateway) ---
-      if [[ "''${OCSB_HERMES_NO_GATEWAY:-0}" != "1" ]]; then
-        hermes gateway run --replace \
-          > "$HERMES_HOME/logs/gateway.log" 2>&1 &
-        _GW_PID=$!
-        disown $_GW_PID
-        echo "[ocsb] gateway started (pid $_GW_PID)" >&2
-      fi
     '';
   };
 
