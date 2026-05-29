@@ -17,20 +17,16 @@
     #     series gets post-newer-series updates, then append and retain those two
     #     follow-up releases.
     ironclaw-src = {
-      url = "github:nearai/ironclaw/ironclaw-v0.28.2";
+      url = "github:nearai/ironclaw/ironclaw-v0.29.0";
       flake = false;
     };
-    ironclaw-src-v0_28_1 = {
-      url = "github:nearai/ironclaw/11aa7e3f246bb993de0d50b38413afd883c301ed";
-      flake = false;
-    };
-    ironclaw-src-v0_27_0 = {
-      url = "github:nearai/ironclaw/93c7d6a484237999a7a202efd6d54f70d785c0b7";
+    ironclaw-src-v0_28_2 = {
+      url = "github:nearai/ironclaw/faf2ed446534a4bb403b375da05061ed636427fb";
       flake = false;
     };
   };
 
-  outputs = inputs@{ self, nixpkgs, hermes-agent, ironclaw-src, ironclaw-src-v0_28_1, ironclaw-src-v0_27_0, ... }:
+  outputs = inputs@{ self, nixpkgs, hermes-agent, ironclaw-src, ironclaw-src-v0_28_2, ... }:
     let
       supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
@@ -42,16 +38,15 @@
       # `ironclaw` / `ironclaw-sandbox` aliases.
       ironclawVersionSeries = [
         {
-          series = "0.28";
+          series = "0.29";
           releases = [
-            { slug = "v0_28_2"; version = "0.28.2"; src = ironclaw-src; }
-            { slug = "v0_28_1"; version = "0.28.1"; src = ironclaw-src-v0_28_1; }
+            { slug = "v0_29_0"; version = "0.29.0"; src = ironclaw-src; }
           ];
         }
         {
-          series = "0.27";
+          series = "0.28";
           releases = [
-            { slug = "v0_27_0"; version = "0.27.0"; src = ironclaw-src-v0_27_0; }
+            { slug = "v0_28_2"; version = "0.28.2"; src = ironclaw-src-v0_28_2; }
           ];
         }
       ];
@@ -186,16 +181,15 @@
               }) ironclawVersionSeries;
               expectedRetention = [
                 {
-                  series = "0.28";
+                  series = "0.29";
                   releases = [
-                    { slug = "v0_28_2"; version = "0.28.2"; }
-                    { slug = "v0_28_1"; version = "0.28.1"; }
+                    { slug = "v0_29_0"; version = "0.29.0"; }
                   ];
                 }
                 {
-                  series = "0.27";
+                  series = "0.28";
                   releases = [
-                    { slug = "v0_27_0"; version = "0.27.0"; }
+                    { slug = "v0_28_2"; version = "0.28.2"; }
                   ];
                 }
               ];
