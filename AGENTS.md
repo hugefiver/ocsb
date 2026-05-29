@@ -81,6 +81,55 @@ Root AGENTS.md is sufficient for now: the repo is small and the complex behavior
 - Hermes network mode is host (`network.enable = null`) because Hermes runs non-root while filtered slirp currently needs uid 0 inside the user namespace. Workspace strategy is direct on `/home/sandbox`.
 - CI builds `.#packages.x86_64-linux.hermes-agent-sandbox` on master/workflow_dispatch and pushes its closure to Cachix.
 
+## DEPENDENCY UPDATE PROCEDURES
+
+All Nix operations run via `wsl -d nixos` on this dev machine. External app packages (Hermes, Ironclaw) are NOT built locally — only `nix flake check --no-build` + `nix build .#packages.x86_64-linux.default` are used for local validation.
+
+### Update nixpkgs
+
+```
+nix flake lock --update-input nixpkgs
+nix flake check --no-build
+nix build .#packages.x86_64-linux.default
+```
+
+### Update hermes-agent
+
+1. Find latest tag on `github:NousResearch/hermes-agent` releases (format: `vYYYY.M.DD`).
+2. Update `flake.nix`: `hermes-agent.url` → new tag.
+3. Sync `scripts/hermes-wrapper.nix`:
+   - `is_default_hermes_api_key_env_name()` must include ALL `api_key_env_vars` from upstream `hermes_cli/auth.py:PROVIDER_REGISTRY`. Check for new providers every upgrade.
+   - `is_hermes_secret_like_env_name()` glob patterns (`*_API_KEY|*_AUTH_TOKEN|*_ACCESS_TOKEN|*_TOKEN`) should already cover new entries; verify.
+4. `nix flake lock --update-input hermes-agent`
+5. `nix flake check --no-build` → verify `hermes-agent-<version>.drv` in output.
+6. `nix build .#packages.x86_64-linux.default`
+
+Do NOT add Ironclaw-style version retention/arch variants to Hermes. Hermes uses a single `hermes-agent` input; users pin specific versions via `--override-input`.
+
+### Update ironclaw
+
+Ironclaw uses source inputs (not flake: `flake = false`), a nested package builder (`pkgs/ironclaw.nix`), and a version retention matrix. Follow these steps:
+
+1. Find latest tag on `github:nearai/ironclaw` releases (format: `ironclaw-vX.Y.Z`).
+2. Apply retention policy (documented in `flake.nix` comments):
+   - Keep two `0.<minor>` series.
+   - Keep two releases for the newest series, one for older series.
+   - Drop anything outside these two series.
+3. Update `flake.nix`:
+   - `ironclaw-src` → new tag.
+   - Pin the old `ironclaw-src` commit as a new `ironclaw-src-vX_Y_Z` input.
+   - Remove dropped version inputs.
+   - Update `ironclawVersionSeries` list to match new retention.
+   - Update `expectedRetention` in `ironclaw-retention-policy` check.
+4. Update `.github/workflows/ci.yml`: `ironclaw-build` job matrix → new version slugs.
+5. Update `README.md`: quick-start table, 快速启动 section, 持久化路径 examples, arch variant examples.
+6. `nix flake lock --update-input ironclaw-src`
+7. `nix flake check --no-build` → verify new + retained version derivations appear, dropped versions are absent, retention check passes.
+8. `nix build .#packages.x86_64-linux.default`
+9. If `nix flake check` fails with a hash mismatch for a new git dep (from `cargoLock.outputHashes`), add the hash to `pkgs/ironclaw.nix:allOutputHashes`. The filtering logic auto-drops unmatched entries, so only the missing crate needs adding.
+
+The template (`templates/ironclaw.nix`) and wrapper (`scripts/ironclaw-wrapper.nix`) should NOT need changes unless upstream breaks the binary path (`bin/ironclaw`), env contract, or DB setup (PostgreSQL version, `SECRETS_MASTER_KEY`, etc). Check the upstream release notes for breaking changes before proceeding.
+
 ## CONVENTIONS
 
 - Commit messages are English semantic style: `fix(sandbox): ...`, `docs(sandbox): ...`, `test(sandbox): ...`.
