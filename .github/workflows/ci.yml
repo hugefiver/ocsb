@@ -86,7 +86,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [v0_28_2, v0_28_1, v0_27_0]
+        version: [v0_29_0, v0_28_2]
         arch: ['', x86_64_v3]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5

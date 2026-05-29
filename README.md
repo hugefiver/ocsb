@@ -17,12 +17,12 @@
 |---|---|
 | `nix run github:hugefiver/ocsb` | 默认：交互 bash + opencode 配置 |
 | `nix run github:hugefiver/ocsb#hermes-agent-sandbox` | Hermes Agent（上游 flake `packages.<system>.default`） |
-| `nix run github:hugefiver/ocsb#ironclaw-sandbox` | Ironclaw 最新版（v0.28.2），自带 postgres18 + pgvector |
-| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_1` | Ironclaw v0.28.1 |
-| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_27_0` | Ironclaw v0.27.0 |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox` | Ironclaw 最新版（v0.29.0），自带 postgres18 + pgvector |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_2` | Ironclaw v0.28.2 |
+| `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_29_0` | Ironclaw v0.29.0（同 latest） |
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox_x86_64_v3` | Ironclaw 最新版，x86-64-v3 优化（Haswell+） |
 
-每个保留版本同时提供 `_x86_64_v3` 后缀的微架构变体（如 `ironclaw-sandbox_v0_28_1_x86_64_v3`），针对 2013+ Intel/AMD CPU 编译。无后缀变体使用 baseline x86-64-v1。
+每个保留版本同时提供 `_x86_64_v3` 后缀的微架构变体（如 `ironclaw-sandbox_v0_28_2_x86_64_v3`），针对 2013+ Intel/AMD CPU 编译。无后缀变体使用 baseline x86-64-v1。
 
 构建产物在 `./result/bin/`。
 
@@ -253,15 +253,15 @@ Hermes wrapper 不会创建独立 `$PERSIST_DIR/workspace`。
 nix run github:hugefiver/ocsb#ironclaw-sandbox
 
 # 指定版本
-nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_1
-nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_27_0
+nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_29_0
+nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_2
 
 # x86-64-v3 优化变体（Haswell+）
 nix run github:hugefiver/ocsb#ironclaw-sandbox_x86_64_v3
-nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_1_x86_64_v3
+nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_2_x86_64_v3
 ```
 
-每个保留版本同时提供 `_x86_64_v3` 后缀的微架构变体（如 `ironclaw-sandbox_v0_28_1_x86_64_v3`），针对 2013+ Intel/AMD CPU 编译。无后缀变体使用 baseline x86-64-v1。
+每个保留版本同时提供 `_x86_64_v3` 后缀的微架构变体（如 `ironclaw-sandbox_v0_28_2_x86_64_v3`），针对 2013+ Intel/AMD CPU 编译。无后缀变体使用 baseline x86-64-v1。
 
 ### 持久化路径
 
@@ -269,10 +269,10 @@ nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_1_x86_64_v3
 
 - 最新版：`~/.cache/ocsb/ironclaw/`
 - 版本 slug 变体：`~/.cache/ocsb/ironclaw_<version>/`，例如：
-  - `ironclaw_v0_28_1` → `~/.cache/ocsb/ironclaw_v0_28_1/`
-  - `ironclaw_v0_27_0` → `~/.cache/ocsb/ironclaw_v0_27_0/`
+  - `ironclaw_v0_29_0` → `~/.cache/ocsb/ironclaw_v0_29_0/`
+  - `ironclaw_v0_28_2` → `~/.cache/ocsb/ironclaw_v0_28_2/`
   - `ironclaw_x86_64_v3` → `~/.cache/ocsb/ironclaw/`
-  - `ironclaw_v0_28_1_x86_64_v3` → `~/.cache/ocsb/ironclaw_v0_28_1/`
+  - `ironclaw_v0_28_2_x86_64_v3` → `~/.cache/ocsb/ironclaw_v0_28_2/`
 
 Ironclaw 的 ocsb state 固定在 `$PERSIST_DIR/state/ironclaw/`，不再跟随启动目录生成 `~/.cache/ocsb/<project-hash>/ironclaw`。其中 `chroot/merged` 是 bind 到沙箱内 `/nix` 的合并后 chroot store；`overlay/` 只存 overlayfs 的 upper/work 等实现细节，不直接暴露进沙箱。
 
