@@ -74,8 +74,220 @@
           mkSandbox = import ./lib/mkSandbox.nix { inherit pkgs; lib = nixpkgs.lib; };
 
           hermesAgentPackage = hermes-agent.packages.${system}.default;
+          hermesServicePackage = pkgs.writeShellScriptBin "service" ''
+            set -euo pipefail
+
+            usage() {
+              cat >&2 <<'EOF'
+            usage: service gateway start|stop|restart|status
+                   service gateway supervise
+            EOF
+              exit 64
+            }
+
+            : ''${HERMES_HOME:=$HOME/.hermes}
+
+            service_name="''${1:-}"
+            action="''${2:-}"
+            if [[ "$service_name" != "gateway" || -z "$action" ]]; then
+              usage
+            fi
+
+            state_dir="$HERMES_HOME/service/gateway"
+            runtime_dir="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/hermes-gateway"
+            pid_file="$runtime_dir/pid"
+            supervisor_pid_file="$runtime_dir/supervisor.pid"
+            stopped_file="$state_dir/stopped"
+            log_file="$HERMES_HOME/logs/gateway.log"
+
+            ensure_gateway_dirs() {
+              ${pkgs.coreutils}/bin/mkdir -p "$state_dir" "$runtime_dir" "$HERMES_HOME/logs"
+            }
+
+            gateway_pid() {
+              local pid
+              if [[ ! -r "$pid_file" ]]; then
+                return 1
+              fi
+              read -r pid < "$pid_file" || true
+              if [[ -z "$pid" ]]; then
+                return 1
+              fi
+              printf '%s\n' "$pid"
+            }
+
+            gateway_running() {
+              local pid
+              if ! pid="$(gateway_pid)"; then
+                return 1
+              fi
+              if kill -0 "$pid" 2>/dev/null; then
+                printf '%s\n' "$pid"
+                return 0
+              fi
+              ${pkgs.coreutils}/bin/rm -f "$pid_file"
+              return 1
+            }
+
+            supervisor_pid() {
+              local pid
+              if [[ ! -r "$supervisor_pid_file" ]]; then
+                return 1
+              fi
+              read -r pid < "$supervisor_pid_file" || true
+              if [[ -z "$pid" ]]; then
+                return 1
+              fi
+              printf '%s\n' "$pid"
+            }
+
+            supervisor_running() {
+              local pid
+              if ! pid="$(supervisor_pid)"; then
+                return 1
+              fi
+              if kill -0 "$pid" 2>/dev/null; then
+                printf '%s\n' "$pid"
+                return 0
+              fi
+              ${pkgs.coreutils}/bin/rm -f "$supervisor_pid_file"
+              return 1
+            }
+
+            start_gateway() {
+              ensure_gateway_dirs
+              ${pkgs.coreutils}/bin/rm -f "$stopped_file"
+              if gateway_running > /dev/null; then
+                echo "gateway already running (pid $(gateway_running))"
+                return 0
+              fi
+              ensure_supervisor
+              echo "gateway started"
+            }
+
+            ensure_supervisor() {
+              ensure_gateway_dirs
+              if supervisor_running > /dev/null; then
+                return 0
+              fi
+              ${pkgs.coreutils}/bin/nohup "$0" gateway supervise > /dev/null 2>&1 &
+            }
+
+            stop_gateway() {
+              local pid
+              ensure_gateway_dirs
+              : > "$stopped_file"
+              if ! pid="$(gateway_running)"; then
+                ${pkgs.coreutils}/bin/rm -f "$pid_file"
+                echo "gateway stopped"
+                return 0
+              fi
+
+              kill "$pid" 2>/dev/null || true
+              for _ in {1..50}; do
+                if ! kill -0 "$pid" 2>/dev/null; then
+                  break
+                fi
+                ${pkgs.coreutils}/bin/sleep 0.1
+              done
+
+              ${pkgs.coreutils}/bin/rm -f "$pid_file"
+              echo "gateway stopped"
+            }
+
+            restart_gateway() {
+              local pid
+              ensure_gateway_dirs
+              ${pkgs.coreutils}/bin/rm -f "$stopped_file"
+
+              if pid="$(gateway_running)"; then
+                kill "$pid" 2>/dev/null || true
+                for _ in {1..50}; do
+                  if ! kill -0 "$pid" 2>/dev/null; then
+                    break
+                  fi
+                  ${pkgs.coreutils}/bin/sleep 0.1
+                done
+                ${pkgs.coreutils}/bin/rm -f "$pid_file"
+                ensure_supervisor
+                echo "gateway restart requested"
+                return 0
+              fi
+
+              ensure_supervisor
+              echo "gateway restart requested"
+            }
+
+            status_gateway() {
+              local enabled_state pid
+              if [[ -e "$stopped_file" ]]; then
+                enabled_state="disabled"
+              else
+                enabled_state="enabled"
+              fi
+
+              if pid="$(gateway_running)"; then
+                echo "gateway running $enabled_state (pid $pid)"
+                return 0
+              fi
+              echo "gateway stopped $enabled_state"
+              return 1
+            }
+
+            supervise_gateway() {
+              local child
+              ensure_gateway_dirs
+              printf '%s\n' "$$" > "$supervisor_pid_file"
+
+              cleanup_supervisor() {
+                if [[ -n "''${child:-}" ]] && kill -0 "$child" 2>/dev/null; then
+                  kill "$child" 2>/dev/null || true
+                fi
+                ${pkgs.coreutils}/bin/rm -f "$pid_file" "$supervisor_pid_file"
+              }
+              trap cleanup_supervisor EXIT
+              trap 'exit 0' INT TERM
+
+              while true; do
+                if [[ -e "$stopped_file" ]]; then
+                  ${pkgs.coreutils}/bin/rm -f "$pid_file"
+                  ${pkgs.coreutils}/bin/sleep 1
+                  continue
+                fi
+
+                hermes gateway run --replace >> "$log_file" 2>&1 &
+                child=$!
+                printf '%s\n' "$child" > "$pid_file"
+                wait "$child" || true
+                child=""
+                ${pkgs.coreutils}/bin/rm -f "$pid_file"
+                ${pkgs.coreutils}/bin/sleep 1
+              done
+            }
+
+            case "$action" in
+              start)
+                start_gateway
+                ;;
+              stop)
+                stop_gateway
+                ;;
+              restart)
+                restart_gateway
+                ;;
+              status)
+                status_gateway
+                ;;
+              supervise)
+                supervise_gateway
+                ;;
+              *)
+                usage
+                ;;
+            esac
+          '';
           mkHermesAgentSandboxBase = mkSandbox (import ./templates/hermes-agent.nix {
-            inherit pkgs hermesAgentPackage;
+            inherit pkgs hermesAgentPackage hermesServicePackage;
           });
 
           mkHermesAgentSandboxBin = pkgs.callPackage ./scripts/hermes-wrapper.nix {
@@ -83,7 +295,7 @@
           };
 
           mkHermesAgentNixConfigSandboxBase = mkSandbox (import ./templates/hermes-agent-nix-config.nix {
-            inherit pkgs hermesAgentPackage;
+            inherit pkgs hermesAgentPackage hermesServicePackage;
           });
           mkHermesAgentNixConfigSandboxBin = pkgs.callPackage ./scripts/hermes-wrapper.nix {
             mkHermesAgentSandboxBase = mkHermesAgentNixConfigSandboxBase;

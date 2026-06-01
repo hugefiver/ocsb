@@ -1,4 +1,4 @@
-{ pkgs, hermesAgentPackage }:
+{ pkgs, hermesAgentPackage, hermesServicePackage }:
 
 { ... }:
 
@@ -12,7 +12,7 @@
       {
         command = ''
           if [[ "''${OCSB_HERMES_NO_GATEWAY:-0}" != "1" ]]; then
-            hermes gateway run --replace > "$HERMES_HOME/logs/gateway.log" 2>&1
+            exec service gateway supervise
           else
             exec ${pkgs.coreutils}/bin/sleep infinity
           fi
@@ -73,7 +73,7 @@ EOF
     '';
   };
 
-  packages = with pkgs; [
+  packages = [ hermesServicePackage ] ++ (with pkgs; [
     coreutils
     gnused
     gawk
@@ -91,7 +91,7 @@ EOF
     nix
     cacert
     procps
-  ];
+  ]);
 
   mounts.rw = [];
 
