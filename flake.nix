@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     hermes-agent = {
-      url = "github:NousResearch/hermes-agent/v2026.5.29";
+      url = "github:NousResearch/hermes-agent/v2026.5.29.2";
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
