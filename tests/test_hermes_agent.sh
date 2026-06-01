@@ -1,15 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WRAPPER="${1:?Usage: $0 <path-to-ocsb-hermes-binary>}"
-TMPDIR="$(mktemp -d)"
-PERSIST_MAIN="$TMPDIR/persist-main"
-PERSIST_EXTERNAL="$TMPDIR/persist-external"
+SOURCE_ONLY=0
+if [[ "${1:-}" == "--source-only" ]]; then
+  SOURCE_ONLY=1
+  shift
+fi
+
+WRAPPER="${1:-}"
+if [[ "$SOURCE_ONLY" != "1" && -z "$WRAPPER" ]]; then
+  echo "Usage: $0 [--source-only] <path-to-ocsb-hermes-binary>" >&2
+  exit 2
+fi
+
+if [[ "$SOURCE_ONLY" == "1" ]]; then
+  TMPDIR=""
+  PERSIST_MAIN=""
+  PERSIST_EXTERNAL=""
+else
+  TMPDIR="$(mktemp -d)"
+  PERSIST_MAIN="$TMPDIR/persist-main"
+  PERSIST_EXTERNAL="$TMPDIR/persist-external"
+fi
 
 PASS=0
 FAIL=0
 
 cleanup() {
+  if [[ -z "${TMPDIR:-}" ]]; then
+    return 0
+  fi
   find "$TMPDIR" -type d -exec chmod u+w {} + 2>/dev/null || true
   rm -rf "$TMPDIR"
 }
@@ -40,12 +60,41 @@ assert_contains() {
   fi
 }
 
+echo "=== hermes-agent sandbox test suite ==="
+
+echo "--- source wiring ---"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FLAKE_TEXT="$(cat "$REPO_ROOT/flake.nix")"
+HERMES_TEMPLATE_TEXT="$(cat "$REPO_ROOT/templates/hermes-agent.nix")"
+HERMES_NIX_CONFIG_TEMPLATE_TEXT="$(cat "$REPO_ROOT/templates/hermes-agent-nix-config.nix")"
+assert_contains "source: helper package defines service binary" "$FLAKE_TEXT" 'writeShellScriptBin "service"'
+assert_contains "source: service command documents gateway actions" "$FLAKE_TEXT" 'service gateway start|stop|restart|status'
+assert_contains "source: restart uses upstream replace" "$FLAKE_TEXT" 'hermes gateway run --replace'
+assert_contains "source: helper stores gateway state under HERMES_HOME" "$FLAKE_TEXT" '"$HERMES_HOME/service/gateway"'
+assert_contains "source: helper defines runtime pid dir" "$FLAKE_TEXT" 'runtime_dir='
+assert_contains "source: helper keeps pid state outside HERMES_HOME" "$FLAKE_TEXT" 'ocsb/hermes-gateway'
+assert_contains "source: helper persists stopped marker" "$FLAKE_TEXT" 'stopped_file="$state_dir/stopped"'
+assert_contains "source: helper tracks supervisor pid" "$FLAKE_TEXT" 'supervisor_pid_file="$runtime_dir/supervisor.pid"'
+assert_contains "source: restart ensures supervisor exists" "$FLAKE_TEXT" 'ensure_supervisor'
+assert_contains "source: status reports enabled state" "$FLAKE_TEXT" 'enabled_state='
+assert_contains "template: daemon uses service gateway supervise" "$HERMES_TEMPLATE_TEXT" 'service gateway supervise'
+assert_contains "template nix-config: daemon uses service gateway supervise" "$HERMES_NIX_CONFIG_TEMPLATE_TEXT" 'service gateway supervise'
+assert_contains "template: installs Hermes service helper" "$HERMES_TEMPLATE_TEXT" 'hermesServicePackage'
+assert_contains "template nix-config: installs Hermes service helper" "$HERMES_NIX_CONFIG_TEMPLATE_TEXT" 'hermesServicePackage'
+
+if [[ "$SOURCE_ONLY" == "1" ]]; then
+  echo ""
+  echo "=== hermes-agent source-only Results: $PASS passed, $FAIL failed ==="
+  if [[ "$FAIL" -gt 0 ]]; then
+    exit 1
+  fi
+  exit 0
+fi
+
 if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
   echo "SKIP: GitHub Actions runners restrict bwrap netns (RTM_NEWADDR)"
   exit 0
 fi
-
-echo "=== hermes-agent sandbox test suite ==="
 
 echo "--- wrapper help text ---"
 HELP_TEXT="$($WRAPPER --help)"
