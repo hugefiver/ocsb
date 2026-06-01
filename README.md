@@ -218,6 +218,9 @@ Hermes wrapper 不会创建独立 `$PERSIST_DIR/workspace`。
 
 - `--persist-dir DIR`
 - `--api-keys-env-file FILE`（caller 提供 API key env 文件，只读挂载，不改写）
+- `-g, --gateway`（只运行 gateway 前台进程）
+- `--replace`（仅与 `--gateway` 搭配，替换已有 gateway sandbox）
+- `--no-gateway`（交互启动时不启用后台 gateway daemon）
 - `-w, --workspace`
 - `--continue` / `--overwrite`（若都未显式给出，自动默认 `--continue`）
 - `--attach` / `--attach=PID`
@@ -241,6 +244,8 @@ Hermes wrapper 不会创建独立 `$PERSIST_DIR/workspace`。
 - preExec 固定导出：`HERMES_HOME=/home/sandbox/.hermes`、`MESSAGING_CWD=/home/sandbox`
 - 若 `~/.hermes/config.yaml` 不存在会自动创建最小配置
 - wrapper 会预创建 `$PERSIST_DIR/home/.hermes/cron/` 目录，供 Hermes 的 cron 任务使用
+- 交互 sandbox 默认会启动 Hermes gateway daemon；进入沙箱后可用 `service gateway start|stop|restart|status` 控制它
+- `service gateway restart` 会重新执行 `hermes gateway run --replace`；服务状态保存在 `$HERMES_HOME/service/gateway/`，日志写入 `$HERMES_HOME/logs/gateway.log`
 
 ## Ironclaw
 
