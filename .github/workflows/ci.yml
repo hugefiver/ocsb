@@ -27,8 +27,15 @@ jobs:
           name: hugefiver
           authToken: '${{ env.CACHIX_AUTH_TOKEN }}'
 
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         continue-on-error: true
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.sha }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+            nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          upload-chunk-size: 67108864
 
       - name: Check flake
         run: nix flake check --no-build
@@ -62,8 +69,15 @@ jobs:
           name: hugefiver
           authToken: '${{ env.CACHIX_AUTH_TOKEN }}'
 
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         continue-on-error: true
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.sha }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+            nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          upload-chunk-size: 67108864
 
       - name: Build hermes-agent-sandbox
         run: nix build .#packages.x86_64-linux.hermes-agent-sandbox --print-build-logs
@@ -98,8 +112,15 @@ jobs:
           name: hugefiver
           authToken: '${{ env.CACHIX_AUTH_TOKEN }}'
 
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         continue-on-error: true
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.sha }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+            nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          upload-chunk-size: 67108864
 
       - name: Compute attribute suffix
         id: attr
@@ -142,8 +163,15 @@ jobs:
           authToken: '${{ env.CACHIX_AUTH_TOKEN }}'
           pushFilter: ".*"
 
-      - uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
         continue-on-error: true
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.sha }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+            nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          upload-chunk-size: 67108864
 
       - name: Build ironclaw-sandbox (latest baseline, from cache)
         run: nix build .#packages.x86_64-linux.ironclaw-sandbox --print-build-logs
