@@ -444,6 +444,34 @@ assert "OCSB_NETWORK set to 'host' by default" [ "$NET_OUTPUT" = "host" ]
 
 echo ""
 
+# --- Chroot integrity verification ---
+echo "--- chroot integrity verification ---"
+
+# Test: removing a store path from an existing chroot triggers re-population on --continue
+CHROOT_CORRUPT_WS="chroot-corrupt-test"
+"$OCSB_BIN" -w "$CHROOT_CORRUPT_WS" --strategy direct --overwrite -- echo "init chroot workspace"
+assert "chroot corrupt: initial workspace created" test -d "$OCSB_STATE_BASE_DIR/$CHROOT_CORRUPT_WS"
+
+# Find the chroot store directory and corrupt it by removing a path
+_CHROOT_STORE="$OCSB_STATE_BASE_DIR/$CHROOT_CORRUPT_WS/chroot/merged/nix/store"
+if [[ -d "$_CHROOT_STORE" ]]; then
+  # Remove one store path to simulate corruption
+  _FIRST_PATH="$(ls "$_CHROOT_STORE" | head -1)"
+  if [[ -n "$_FIRST_PATH" ]]; then
+    chmod -R u+w "$_CHROOT_STORE/$_FIRST_PATH" 2>/dev/null || true
+    rm -rf "$_CHROOT_STORE/$_FIRST_PATH"
+    # --continue should detect the missing path and re-populate
+    assert "chroot corrupt: --continue recovers from missing store path" \
+      "$OCSB_BIN" -w "$CHROOT_CORRUPT_WS" --continue --strategy direct -- echo "recovered"
+  else
+    echo "  SKIP: no store paths to remove in chroot"
+  fi
+else
+  echo "  SKIP: chroot store not found (may be closure-only mode)"
+fi
+
+echo ""
+
 echo "=== Wrapper Results: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
   exit 1

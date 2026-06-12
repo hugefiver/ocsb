@@ -726,6 +726,25 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       fi
     }
 
+    # Verify that every store path in the closure exists inside the chroot.
+    # Returns 0 if all paths present, 1 if any are missing.
+    # Prints missing paths to stderr for diagnostics.
+    verify_chroot_store() {
+      local _chroot_root="$1"
+      local _store_paths_file="$2"
+      local _missing=0
+      local _path
+
+      while IFS= read -r _path; do
+        if [[ ! -e "$_chroot_root$_path" ]]; then
+          echo "ocsb: warning: chroot store path missing: $_path" >&2
+          _missing=1
+        fi
+      done < "$_store_paths_file"
+
+      return $_missing
+    }
+
     append_nix_store_args() {
       # /nix/store layout — see modules/experimental.nix nixStoreMode for tradeoffs.
       ${if cfg.experimental.nixStoreMode == "chroot" then ''
@@ -751,7 +770,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         _CHROOT_PRESEEDED=0
         _CHROOT_DB_DUMP="$_CHROOT_STATE_DIR/.valid-paths.dump"
         ${pkgs.coreutils}/bin/rm -f "$_CHROOT_DB_DUMP"
-        if ${pkgs.coreutils}/bin/cp -al "''${_CHROOT_PATHS[@]}" "$_CHROOT_ROOT/nix/store/" 2>/dev/null && \
+        if ${pkgs.coreutils}/bin/cp -al "''${_CHROOT_PATHS[@]}" "$_CHROOT_ROOT/nix/store/" && \
            ${pkgs.nix}/bin/nix-store --dump-db "''${_CHROOT_PATHS[@]}" > "$_CHROOT_DB_DUMP" && \
            ${pkgs.nix}/bin/nix-store --store "local?root=$_CHROOT_ROOT" --load-db < "$_CHROOT_DB_DUMP"; then
           _CHROOT_PRESEEDED=1
@@ -775,8 +794,30 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           echo "ocsb: error: nix copy into chroot store failed" >&2
           exit 1
         fi
+
+        # Verify every store path from the closure actually exists in the chroot.
+        # Catches partial cp -al or nix copy failures that would otherwise leave
+        # the chroot incomplete but marked as ready.
+        if ! verify_chroot_store "$_CHROOT_ROOT" "$_CHROOT_SRC/store-paths"; then
+          echo "ocsb: error: chroot store is incomplete after population; refusing to continue" >&2
+          echo "ocsb:   try --overwrite to rebuild the workspace, or remove $OVERLAY_STATE_DIR/chroot manually" >&2
+          exit 1
+        fi
+
         echo "$_CHROOT_SRC" > "$_CHROOT_MARKER"
         echo "ocsb: chroot nix store ready" >&2
+      else
+        # Marker matches — but verify the chroot is actually intact.
+        # Handles the edge case where the chroot was populated but later
+        # corrupted (e.g. manual deletion, filesystem issues) or the
+        # initial population partially failed without being caught.
+        if ! verify_chroot_store "$_CHROOT_ROOT" "$_CHROOT_SRC/store-paths"; then
+          echo "ocsb: chroot store has missing paths; re-populating..." >&2
+          ${pkgs.coreutils}/bin/rm -f "$_CHROOT_MARKER"
+          # Re-enter the population branch by recursing once
+          append_nix_store_args
+          return
+        fi
       fi
       BWRAP_ARGS+=(
         --bind "$_CHROOT_ROOT/nix/store" /nix/store
