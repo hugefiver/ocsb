@@ -830,6 +830,18 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           echo "ocsb: chroot store repaired" >&2
         fi
       fi
+
+      # Rebuild gcroots for the current closure so that `nix gc` inside the
+      # sandbox cannot collect ocsb's base dependencies (supervisor, bash,
+      # bwrap, etc.).  All closure gcroots live under a single directory that
+      # is wiped and rebuilt on every launch — this ensures stale closure
+      # paths from previous builds become reclaimable by `nix gc`.
+      _GCROOTS_DIR="$_CHROOT_ROOT/nix/var/nix/gcroots/ocsb-closure"
+      ${pkgs.coreutils}/bin/rm -rf "$_GCROOTS_DIR"
+      ${pkgs.coreutils}/bin/mkdir -p "$_GCROOTS_DIR"
+      while IFS= read -r _gcpath; do
+        ${pkgs.coreutils}/bin/ln -s "$_gcpath" "$_GCROOTS_DIR/"
+      done < "$_CHROOT_SRC/store-paths"
       BWRAP_ARGS+=(
         --bind "$_CHROOT_ROOT/nix/store" /nix/store
         --bind "$_CHROOT_ROOT/nix/var/nix" /nix/var/nix
