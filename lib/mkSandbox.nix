@@ -770,7 +770,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         _CHROOT_PRESEEDED=0
         _CHROOT_DB_DUMP="$_CHROOT_STATE_DIR/.valid-paths.dump"
         ${pkgs.coreutils}/bin/rm -f "$_CHROOT_DB_DUMP"
-        if ${pkgs.coreutils}/bin/cp -al "''${_CHROOT_PATHS[@]}" "$_CHROOT_ROOT/nix/store/" && \
+        if ${pkgs.coreutils}/bin/cp -al "''${_CHROOT_PATHS[@]}" "$_CHROOT_ROOT/nix/store/" 2>/dev/null && \
            ${pkgs.nix}/bin/nix-store --dump-db "''${_CHROOT_PATHS[@]}" > "$_CHROOT_DB_DUMP" && \
            ${pkgs.nix}/bin/nix-store --store "local?root=$_CHROOT_ROOT" --load-db < "$_CHROOT_DB_DUMP"; then
           _CHROOT_PRESEEDED=1
@@ -812,11 +812,22 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         # corrupted (e.g. manual deletion, filesystem issues) or the
         # initial population partially failed without being caught.
         if ! verify_chroot_store "$_CHROOT_ROOT" "$_CHROOT_SRC/store-paths"; then
-          echo "ocsb: chroot store has missing paths; re-populating..." >&2
-          ${pkgs.coreutils}/bin/rm -f "$_CHROOT_MARKER"
-          # Re-enter the population branch by recursing once
-          append_nix_store_args
-          return
+          echo "ocsb: chroot store has missing paths; repairing from host..." >&2
+          local _mpath
+          while IFS= read -r _mpath; do
+            if [[ ! -e "$_CHROOT_ROOT$_mpath" ]] && [[ -e "$_mpath" ]]; then
+              ${pkgs.coreutils}/bin/cp -a "$_mpath" "$_CHROOT_ROOT/nix/store/" 2>/dev/null || \
+                ${pkgs.coreutils}/bin/cp -r "$_mpath" "$_CHROOT_ROOT/nix/store/" 2>/dev/null || {
+                echo "ocsb: error: failed to copy missing store path $_mpath into chroot" >&2
+                exit 1
+              }
+            fi
+          done < "$_CHROOT_SRC/store-paths"
+          if ! verify_chroot_store "$_CHROOT_ROOT" "$_CHROOT_SRC/store-paths"; then
+            echo "ocsb: error: chroot store still incomplete after repair; host store paths may be missing (nix gc?)" >&2
+            exit 1
+          fi
+          echo "ocsb: chroot store repaired" >&2
         fi
       fi
       BWRAP_ARGS+=(
