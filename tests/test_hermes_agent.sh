@@ -68,7 +68,7 @@ FLAKE_TEXT="$(cat "$REPO_ROOT/flake.nix")"
 HERMES_WRAPPER_TEXT="$(cat "$REPO_ROOT/scripts/hermes-wrapper.nix")"
 HERMES_TEMPLATE_TEXT="$(cat "$REPO_ROOT/templates/hermes-agent.nix")"
 HERMES_NIX_CONFIG_TEMPLATE_TEXT="$(cat "$REPO_ROOT/templates/hermes-agent-nix-config.nix")"
-assert_contains "source: hermes input points at Hermes Agent 0.16.0 tag" "$FLAKE_TEXT" 'github:NousResearch/hermes-agent/v2026.6.5'
+assert_contains "source: hermes input points at Hermes Agent 0.17.0 tag" "$FLAKE_TEXT" 'github:NousResearch/hermes-agent/v2026.6.19'
 assert_contains "source: helper package defines service binary" "$FLAKE_TEXT" 'writeShellScriptBin "service"'
 assert_contains "source: service command documents gateway actions" "$FLAKE_TEXT" 'service gateway start|stop|restart|status'
 assert_contains "source: restart uses upstream replace" "$FLAKE_TEXT" 'hermes gateway run --replace'
