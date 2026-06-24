@@ -95,7 +95,7 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
 
   is_reserved_hermes_env_name() {
     case "$1" in
-      OCSB_HERMES_AGENT_PERSIST_DIR|OCSB_HERMES_AGENT_API_KEYS_ENV_FILE|OCSB_HERMES_NO_GATEWAY|HERMES_HOME|MESSAGING_CWD)
+      OCSB_HERMES_AGENT_PERSIST_DIR|OCSB_HERMES_AGENT_API_KEYS_ENV_FILE|OCSB_HERMES_NO_GATEWAY|HERMES_HOME|TERMINAL_CWD)
         return 0
         ;;
       *)

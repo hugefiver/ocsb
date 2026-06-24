@@ -89,8 +89,8 @@ let
       set -euo pipefail
 
       : ''${HERMES_HOME:=$HOME/.hermes}
-      : ''${MESSAGING_CWD:=/home/sandbox}
-      export HERMES_HOME MESSAGING_CWD
+      : ''${TERMINAL_CWD:=/home/sandbox}
+      export HERMES_HOME TERMINAL_CWD
 
       # persistent venv — create if missing, inject PYTHONPATH / PATH
       _VENV="$HOME/.hermes-venv"

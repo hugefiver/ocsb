@@ -24,10 +24,10 @@
       set -euo pipefail
 
       export HERMES_HOME="$HOME/.hermes"
-      export MESSAGING_CWD="/home/sandbox"
+      export TERMINAL_CWD="/home/sandbox"
 
       mkdir -p "$HOME/.config/nix"
-      mkdir -p "$HERMES_HOME" "$MESSAGING_CWD" "$HERMES_HOME/cron" "$HERMES_HOME/sessions" "$HERMES_HOME/logs" "$HERMES_HOME/memories" "$HERMES_HOME/plugins"
+      mkdir -p "$HERMES_HOME" "$TERMINAL_CWD" "$HERMES_HOME/cron" "$HERMES_HOME/sessions" "$HERMES_HOME/logs" "$HERMES_HOME/memories" "$HERMES_HOME/plugins"
 
       # --- persistent venv for Python packages ---
       # Persisted in $HOME so it survives workspace resets.
@@ -44,7 +44,7 @@
 
       if [[ ! -f "$HERMES_HOME/config.yaml" ]]; then
         cat > "$HERMES_HOME/config.yaml" <<EOF
-      messaging:
+      terminal:
         cwd: /home/sandbox
 EOF
       fi

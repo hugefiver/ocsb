@@ -4,7 +4,8 @@
 # 用法：hermesInit = pkgs.callPackage ./lib/hermes-config.nix { ... }
 {
   # Hermes 沙箱内工作目录，默认 /home/sandbox（sandbox 内 HOME 路径）
-  messagingCwd ? "/home/sandbox",
+  # v0.17.0+ 用 terminal.cwd 取代旧的 messaging.cwd 根键。
+  terminalCwd ? "/home/sandbox",
   # 额外的 config.yaml 内容（追加到基础配置后）
   extraConfig ? "",
   # 是否预创建 Hermes 工作目录（cron/sessions/logs/memories/plugins）
@@ -15,8 +16,8 @@ let
   inherit (lib) optionalString;
 
   configYaml = pkgs.writeText "hermes-config.yaml" ''
-    messaging:
-      cwd: ${messagingCwd}
+    terminal:
+      cwd: ${terminalCwd}
     ${optionalString (extraConfig != "") extraConfig}
   '';
 in

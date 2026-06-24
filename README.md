@@ -235,13 +235,13 @@ Hermes wrapper 不会创建独立 `$PERSIST_DIR/workspace`。
 - 该文件只读挂载到沙箱 `/tmp/ocsb-hermes-agent-api-keys.env`，模板 preExec 再 `source`
 - 指定 `--api-keys-env-file FILE` 时，仅校验可读并只读挂载；wrapper 不重写 caller 文件
 - secret env 不通过 inner `ocsb --env` argv 下传，也会从 `OCSB_FORWARD_ENV` 中清理
-- `--env` 禁止覆盖以下内部保留名（报错包含 "reserved for the Hermes Agent wrapper"）：`OCSB_HERMES_AGENT_PERSIST_DIR`、`OCSB_HERMES_AGENT_API_KEYS_ENV_FILE`、`OCSB_HERMES_NO_GATEWAY`、`HERMES_HOME`、`MESSAGING_CWD`
+- `--env` 禁止覆盖以下内部保留名（报错包含 "reserved for the Hermes Agent wrapper"）：`OCSB_HERMES_AGENT_PERSIST_DIR`、`OCSB_HERMES_AGENT_API_KEYS_ENV_FILE`、`OCSB_HERMES_NO_GATEWAY`、`HERMES_HOME`、`TERMINAL_CWD`
 
 ### 运行时约定
 
 - 网络默认共享宿主网络（`network.enable = null`）：Hermes 需要非 root 运行，而当前 ocsb filtered/slirp 网络模式需要沙箱内 uid 0；后续支持 multi-uid 映射后再恢复 filtered 网络隔离
 - 无 Postgres/sidecar/DB 初始化逻辑
-- preExec 固定导出：`HERMES_HOME=/home/sandbox/.hermes`、`MESSAGING_CWD=/home/sandbox`
+- preExec 固定导出：`HERMES_HOME=/home/sandbox/.hermes`、`TERMINAL_CWD=/home/sandbox`
 - 若 `~/.hermes/config.yaml` 不存在会自动创建最小配置
 - wrapper 会预创建 `$PERSIST_DIR/home/.hermes/cron/` 目录，供 Hermes 的 cron 任务使用
 - 交互 sandbox 默认会启动 Hermes gateway daemon；进入沙箱后可用 `service gateway start|stop|restart|status` 控制它

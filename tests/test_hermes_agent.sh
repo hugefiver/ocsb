@@ -144,8 +144,8 @@ if [[ "${HERMES_HOME:-}" != "/home/sandbox/.hermes" ]]; then
   exit 1
 fi
 
-if [[ "${MESSAGING_CWD:-}" != "/home/sandbox" ]]; then
-  echo "expected MESSAGING_CWD=/home/sandbox, got ${MESSAGING_CWD:-<unset>}" >&2
+if [[ "${TERMINAL_CWD:-}" != "/home/sandbox" ]]; then
+  echo "expected TERMINAL_CWD=/home/sandbox, got ${TERMINAL_CWD:-<unset>}" >&2
   exit 1
 fi
 
@@ -333,7 +333,7 @@ RES_API_FILE_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSI
 RES_API_FILE_RC=$?
 RES_HERMES_HOME_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env HERMES_HOME=/tmp/nope -- --version 2>&1)"
 RES_HERMES_HOME_RC=$?
-RES_MSG_CWD_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env MESSAGING_CWD=/tmp/nope -- --version 2>&1)"
+RES_MSG_CWD_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env TERMINAL_CWD=/tmp/nope -- --version 2>&1)"
 RES_MSG_CWD_RC=$?
 RES_NO_GATEWAY_OUT="$($WRAPPER --strategy direct --overwrite --persist-dir "$PERSIST_MAIN" --env OCSB_HERMES_NO_GATEWAY=1 -- --version 2>&1)"
 RES_NO_GATEWAY_RC=$?
@@ -345,8 +345,8 @@ assert "reserved OCSB_HERMES_AGENT_API_KEYS_ENV_FILE fails" test "$RES_API_FILE_
 assert_contains "reserved OCSB_HERMES_AGENT_API_KEYS_ENV_FILE message" "$RES_API_FILE_OUT" "reserved for the Hermes Agent wrapper"
 assert "reserved HERMES_HOME fails" test "$RES_HERMES_HOME_RC" -ne 0
 assert_contains "reserved HERMES_HOME message" "$RES_HERMES_HOME_OUT" "reserved for the Hermes Agent wrapper"
-assert "reserved MESSAGING_CWD fails" test "$RES_MSG_CWD_RC" -ne 0
-assert_contains "reserved MESSAGING_CWD message" "$RES_MSG_CWD_OUT" "reserved for the Hermes Agent wrapper"
+assert "reserved TERMINAL_CWD fails" test "$RES_MSG_CWD_RC" -ne 0
+assert_contains "reserved TERMINAL_CWD message" "$RES_MSG_CWD_OUT" "reserved for the Hermes Agent wrapper"
 assert "reserved OCSB_HERMES_NO_GATEWAY fails" test "$RES_NO_GATEWAY_RC" -ne 0
 assert_contains "reserved OCSB_HERMES_NO_GATEWAY message" "$RES_NO_GATEWAY_OUT" "reserved for the Hermes Agent wrapper"
 

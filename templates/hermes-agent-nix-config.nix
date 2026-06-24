@@ -25,7 +25,7 @@
 
       # --- ocsb sandbox env ---
       export HERMES_HOME="$HOME/.hermes"
-      export MESSAGING_CWD="/home/sandbox"
+      export TERMINAL_CWD="/home/sandbox"
 
       # --- hermes init (dirs + config.yaml) ---
       ${hermesInit}
