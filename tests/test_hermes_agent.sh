@@ -68,7 +68,7 @@ FLAKE_TEXT="$(cat "$REPO_ROOT/flake.nix")"
 HERMES_WRAPPER_TEXT="$(cat "$REPO_ROOT/scripts/hermes-wrapper.nix")"
 HERMES_TEMPLATE_TEXT="$(cat "$REPO_ROOT/templates/hermes-agent.nix")"
 HERMES_NIX_CONFIG_TEMPLATE_TEXT="$(cat "$REPO_ROOT/templates/hermes-agent-nix-config.nix")"
-assert_contains "source: hermes input points at Hermes Agent v2026.7.1 tag" "$FLAKE_TEXT" 'github:NousResearch/hermes-agent/v2026.7.1'
+assert_contains "source: hermes input points at Hermes Agent v2026.7.20 tag" "$FLAKE_TEXT" 'github:NousResearch/hermes-agent/v2026.7.20'
 assert_contains "source: helper package defines service binary" "$FLAKE_TEXT" 'writeShellScriptBin "service"'
 assert_contains "source: service command documents gateway actions" "$FLAKE_TEXT" 'service gateway start|stop|restart|status'
 assert_contains "source: restart uses upstream replace" "$FLAKE_TEXT" 'hermes gateway run --replace'
@@ -83,7 +83,7 @@ assert_contains "template: daemon uses service gateway supervise" "$HERMES_TEMPL
 assert_contains "template nix-config: daemon uses service gateway supervise" "$HERMES_NIX_CONFIG_TEMPLATE_TEXT" 'service gateway supervise'
 assert_contains "template: installs Hermes service helper" "$HERMES_TEMPLATE_TEXT" 'hermesServicePackage'
 assert_contains "template nix-config: installs Hermes service helper" "$HERMES_NIX_CONFIG_TEMPLATE_TEXT" 'hermesServicePackage'
-for _env_name in ALIBABA_CODING_PLAN_API_KEY GH_TOKEN GITHUB_TOKEN ZAI_API_KEY Z_AI_API_KEY NOUS_API_KEY QWEN_API_KEY; do
+for _env_name in ALIBABA_CODING_PLAN_API_KEY GH_TOKEN GITHUB_TOKEN ZAI_API_KEY Z_AI_API_KEY NOUS_API_KEY QWEN_API_KEY DEEPINFRA_API_KEY UPSTAGE_API_KEY; do
   assert_contains "source: wrapper captures default Hermes API key env $_env_name" "$HERMES_WRAPPER_TEXT" "$_env_name"
 done
 
