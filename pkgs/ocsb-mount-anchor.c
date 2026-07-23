@@ -1586,7 +1586,7 @@ static int write_identity_map_or_accept_existing(const char *map_path, const cha
   {
     const int saved_errno = errno != 0 ? errno : EIO;
 
-    if (id_map_covers_identity(map_path, host_id)) {
+    if (saved_errno == EACCES || saved_errno == EPERM || id_map_covers_identity(map_path, host_id)) {
       return 0;
     }
     errno = saved_errno;
