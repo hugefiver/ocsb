@@ -107,18 +107,55 @@ jobs:
           IRONCLAW_KEY=$(bash tests/test_ironclaw.sh --build-key-fixture "$RUNNER_TEMP/ironclaw-key")
           bash tests/test_ironclaw.sh --case master-key-window "$IRONCLAW_KEY"
 
-      - name: Run core runtime suites
+      - name: Build default package for runtime suites
         run: |
           set -euo pipefail
-           DEFAULT_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
-           env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb"
-           env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb" --case runtime-pidfile-clobber
-           bash tests/test_backend.sh .
-           bash tests/test_backend.sh . --case process-record-schema
-           bash tests/test_backend.sh . --case container-rootfs-persistence
-           bash tests/test_backend.sh . --case generic-daemon-pip
+          DEFAULT_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
+          printf 'DEFAULT_OUT=%s\n' "$DEFAULT_OUT" >> "$GITHUB_ENV"
+
+      - name: Wrapper runtime suite
+        run: |
+          set -euo pipefail
+          env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb"
+
+      - name: Wrapper runtime pidfile fixture
+        run: |
+          set -euo pipefail
+          env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb" --case runtime-pidfile-clobber
+
+      - name: Backend runtime suite
+        run: |
+          set -euo pipefail
+          bash tests/test_backend.sh .
+
+      - name: Backend process record fixture
+        run: |
+          set -euo pipefail
+          bash tests/test_backend.sh . --case process-record-schema
+
+      - name: Backend container rootfs fixture
+        run: |
+          set -euo pipefail
+          bash tests/test_backend.sh . --case container-rootfs-persistence
+
+      - name: Backend generic daemon fixture
+        run: |
+          set -euo pipefail
+          bash tests/test_backend.sh . --case generic-daemon-pip
+
+      - name: Binpath runtime suite
+        run: |
+          set -euo pipefail
           bash tests/test_binpath.sh .
+
+      - name: Git worktree runtime suite
+        run: |
+          set -euo pipefail
           env -u XDG_RUNTIME_DIR bash tests/test_git_worktree.sh "$DEFAULT_OUT/bin/ocsb"
+
+      - name: Btrfs runtime suite
+        run: |
+          set -euo pipefail
           env -u XDG_RUNTIME_DIR bash tests/test_btrfs.sh "$DEFAULT_OUT/bin/ocsb"
 
       - name: Run dual-layer runtime suites
