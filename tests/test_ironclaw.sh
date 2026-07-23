@@ -919,7 +919,10 @@ gate_exec() {
     id="${1:-}"; require_immutable_id "$id"
     [[ "$(read_metadata status)" == created || "$(read_metadata status)" == exited ]] || exit 82
     [[ "${OCSB_FAKE_START_FAIL:-0}" != 1 ]] || { record_operation "start:$id"; exit 89; }
-    write_metadata status running; record_operation "start:$id"; start_gate_process "$id"
+    write_metadata status running; record_operation "start:$id"
+    if [[ "$scenario" != concurrency ]]; then
+      start_gate_process "$id"
+    fi
     ;;
   cp)
     source="${1:-}"; destination="${2:-}"
