@@ -126,6 +126,9 @@ jobs:
             SUMMARY="$RUNNER_TEMP/wrapper-runtime-summary.log"
             {
               printf 'wrapper runtime exit=%s\n' "$rc"
+              printf '%s\n' '--- focused failure lines ---'
+              grep -E '(^[[:space:]]*FAIL|FAIL\[|ERROR|error|timed out|ocsb:)' "$LOG" || true
+              printf '%s\n' '--- filtered tail ---'
               grep -Ev '^(copying path|warning: unknown setting)' "$LOG" | tail -160
             } > "$SUMMARY"
             msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$SUMMARY")
