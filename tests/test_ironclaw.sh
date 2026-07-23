@@ -723,15 +723,49 @@ start_gate_process() {
   printf '%s\n' "$!" > "$state_dir/gate-pid"
 }
 gate_exec() {
-  local id="$1" binary root argument mode decision="" index
+  local id="$1" binary root argument mode decision="" index generation nonce
   shift
   binary="$1"
   shift
   require_immutable_id "$id"
   [[ "$binary" == /ocsb-sidecar-gate/ocsb-sidecar-gate ]] || exit 76
+  mode="${1:-}"
+  if [[ "$scenario" == concurrency ]]; then
+    record_operation "gate:${mode:-query}:$id"
+    generation="$(read_metadata label-generation)"
+    if [[ ! -s "$(meta_path gate-run-nonce)" ]]; then
+      printf 'd%.0s' {1..64} > "$(meta_path gate-run-nonce)"
+    fi
+    nonce="$(read_metadata gate-run-nonce)"
+    case "$mode" in
+      verify)
+        printf 'MOUNT-VERIFIED %s %s\n' "$generation" "$nonce"
+        ;;
+      release)
+        printf 'PREPARED %s %s\n' "$generation" "$nonce"
+        ;;
+      decision)
+        decision=absent
+        for argument in "$@"; do
+          case "$argument" in
+            --commit) decision=commit ;;
+            --abort) decision=abort ;;
+          esac
+        done
+        [[ "$decision" == absent ]] || write_metadata gate-decision "$decision"
+        if [[ "$decision" == absent && -s "$(meta_path gate-decision)" ]]; then
+          decision="$(read_metadata gate-decision)"
+        fi
+        printf 'DECISION %s %s %s\n' "$decision" "$generation" "$nonce"
+        ;;
+      ack)
+        ;;
+      *) exit 78 ;;
+    esac
+    exit 0
+  fi
   root="$(container_root)"
   wait_for_gate_state "$root" || exit 77
-  mode="${1:-}"
   local -a mapped=()
   for argument in "$@"; do
     [[ -n "$argument" ]] || continue
