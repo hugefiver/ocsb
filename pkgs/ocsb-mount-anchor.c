@@ -228,6 +228,9 @@ struct configuration {
   enum namespace_type namespace_mode;
   uid_t host_uid;
   gid_t host_gid;
+  bool bubblewrap_rewrite_identity;
+  uid_t bubblewrap_uid;
+  gid_t bubblewrap_gid;
   char *anchor_root;
   struct workspace_mutation_spec mutation_spec;
   char *workspace_receipt_path;
@@ -2490,7 +2493,9 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
     return -1;
   }
   if (getuid() != configuration->host_uid || getgid() != configuration->host_gid) {
-    return bubblewrap_failure("user namespace identity changed unexpectedly");
+    configuration->bubblewrap_rewrite_identity = true;
+    configuration->bubblewrap_uid = getuid();
+    configuration->bubblewrap_gid = getgid();
   }
   if (configuration->inherited_root_count != 0U) {
     return translate_inherited_roots_into_bubblewrap_namespace(configuration, original_cwd_fd);
@@ -5420,6 +5425,41 @@ static int build_backend_argv(const struct configuration *configuration, char **
     if (arguments[index] == NULL) {
       errorf("cannot copy backend argv");
       goto failure;
+    }
+  }
+  if (configuration->backend == BACKEND_BUBBLEWRAP && configuration->bubblewrap_rewrite_identity) {
+    char uid_text[32];
+    char gid_text[32];
+    int uid_length;
+    int gid_length;
+
+    uid_length = snprintf(uid_text, sizeof(uid_text), "%" PRIuMAX,
+                          (uintmax_t)configuration->bubblewrap_uid);
+    gid_length = snprintf(gid_text, sizeof(gid_text), "%" PRIuMAX,
+                          (uintmax_t)configuration->bubblewrap_gid);
+    if (uid_length < 0 || (size_t)uid_length >= sizeof(uid_text) || gid_length < 0 ||
+        (size_t)gid_length >= sizeof(gid_text)) {
+      errorf("cannot format fallback bubblewrap identity");
+      goto failure;
+    }
+    for (index = 1U; index + 1U < configuration->backend_argc; ++index) {
+      if (strcmp(arguments[index], "--uid") == 0) {
+        char *replacement_uid = strdup(uid_text);
+        if (replacement_uid == NULL) {
+          errorf("cannot rewrite fallback bubblewrap uid");
+          goto failure;
+        }
+        free(arguments[index + 1U]);
+        arguments[index + 1U] = replacement_uid;
+      } else if (strcmp(arguments[index], "--gid") == 0) {
+        char *replacement_gid = strdup(gid_text);
+        if (replacement_gid == NULL) {
+          errorf("cannot rewrite fallback bubblewrap gid");
+          goto failure;
+        }
+        free(arguments[index + 1U]);
+        arguments[index + 1U] = replacement_gid;
+      }
     }
   }
   for (index = 0U; index < configuration->source_count; ++index) {
