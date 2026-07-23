@@ -1581,15 +1581,24 @@ static int id_map_covers_identity(const char *map_path, uintmax_t host_id) {
   return 0;
 }
 
-static int write_identity_map_or_accept_existing(const char *map_path, const char *map_text,
-                                                 uintmax_t host_id, const char *stage) {
-  if (write_proc_file(map_path, map_text) == 0) {
+static int write_identity_map_or_root_fallback(const char *map_path, const char *identity_map_text,
+                                               const char *root_map_text, uintmax_t host_id,
+                                               const char *stage) {
+  if (write_proc_file(map_path, identity_map_text) == 0) {
     return 0;
   }
   {
     const int saved_errno = errno != 0 ? errno : EIO;
 
-    if (saved_errno == EACCES || saved_errno == EPERM || id_map_covers_identity(map_path, host_id)) {
+    if (id_map_covers_identity(map_path, host_id) ||
+        podman_rootless_id_map_matches(map_path, host_id)) {
+      return 0;
+    }
+    if ((saved_errno == EACCES || saved_errno == EPERM) &&
+        write_proc_file(map_path, root_map_text) == 0) {
+      return 0;
+    }
+    if (podman_rootless_id_map_matches(map_path, host_id)) {
       return 0;
     }
     errno = saved_errno;
@@ -2463,8 +2472,12 @@ out:
 static int setup_bubblewrap_namespace(struct configuration *configuration, int *original_cwd_fd) {
   char uid_map[128];
   char gid_map[128];
+  char root_uid_map[128];
+  char root_gid_map[128];
   int uid_map_length;
   int gid_map_length;
+  int root_uid_map_length;
+  int root_gid_map_length;
 
   if (unshare(CLONE_NEWUSER |
               (configuration->inherited_root_count == 0U ? CLONE_NEWNS : 0)) != 0) {
@@ -2482,18 +2495,24 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
   gid_map_length = snprintf(gid_map, sizeof(gid_map), "%" PRIuMAX " %" PRIuMAX " 1\n",
                             (uintmax_t)configuration->host_gid,
                             (uintmax_t)configuration->host_gid);
+  root_uid_map_length = snprintf(root_uid_map, sizeof(root_uid_map), "0 %" PRIuMAX " 1\n",
+                                 (uintmax_t)configuration->host_uid);
+  root_gid_map_length = snprintf(root_gid_map, sizeof(root_gid_map), "0 %" PRIuMAX " 1\n",
+                                 (uintmax_t)configuration->host_gid);
   if (uid_map_length < 0 || (size_t)uid_map_length >= sizeof(uid_map) || gid_map_length < 0 ||
-      (size_t)gid_map_length >= sizeof(gid_map)) {
+      (size_t)gid_map_length >= sizeof(gid_map) || root_uid_map_length < 0 ||
+      (size_t)root_uid_map_length >= sizeof(root_uid_map) || root_gid_map_length < 0 ||
+      (size_t)root_gid_map_length >= sizeof(root_gid_map)) {
     return bubblewrap_failure("cannot format user namespace identity maps");
   }
-  if (write_identity_map_or_accept_existing("/proc/self/uid_map", uid_map,
-                                            (uintmax_t)configuration->host_uid,
-                                            "write /proc/self/uid_map") != 0) {
+  if (write_identity_map_or_root_fallback("/proc/self/uid_map", uid_map, root_uid_map,
+                                          (uintmax_t)configuration->host_uid,
+                                          "write /proc/self/uid_map") != 0) {
     return -1;
   }
-  if (write_identity_map_or_accept_existing("/proc/self/gid_map", gid_map,
-                                            (uintmax_t)configuration->host_gid,
-                                            "write /proc/self/gid_map") != 0) {
+  if (write_identity_map_or_root_fallback("/proc/self/gid_map", gid_map, root_gid_map,
+                                          (uintmax_t)configuration->host_gid,
+                                          "write /proc/self/gid_map") != 0) {
     return -1;
   }
   if (getuid() != configuration->host_uid || getgid() != configuration->host_gid) {
