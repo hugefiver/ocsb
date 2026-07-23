@@ -40,21 +40,49 @@ jobs:
       - name: Check flake
         run: nix flake check --no-build
 
-      - name: Run external wrapper source and lightweight suites
+      - name: Hermes source assertions
         run: |
           set -euo pipefail
           bash tests/test_hermes_agent.sh --source-only
+
+      - name: Hermes gateway reservation fixture
+        run: |
+          set -euo pipefail
           HERMES_GATEWAY=$(bash tests/test_hermes_agent.sh --build-service-fixture "$RUNNER_TEMP/hermes-gateway")
           bash tests/test_hermes_agent.sh --case gateway-reservation "$HERMES_GATEWAY"
+
+      - name: Hermes dead-candidate fixture
+        run: |
+          set -euo pipefail
           HERMES_DEAD_CANDIDATE=$(bash tests/test_hermes_agent.sh --build-service-fixture "$RUNNER_TEMP/hermes-dead-candidate")
           bash tests/test_hermes_agent.sh --case gateway-dead-candidate "$HERMES_DEAD_CANDIDATE"
+
+      - name: Hermes replace identity fixture
+        run: |
+          set -euo pipefail
           HERMES_REPLACE=$(bash tests/test_hermes_agent.sh --build-lightweight-wrapper "$RUNNER_TEMP/hermes-replace")
           bash tests/test_hermes_agent.sh --case replace-identity "$HERMES_REPLACE"
+
+      - name: Hermes caller-file secret fixture
+        run: |
+          set -euo pipefail
           HERMES_CALLER_FILE=$(bash tests/test_hermes_agent.sh --build-lightweight-wrapper "$RUNNER_TEMP/hermes-caller-file")
           bash tests/test_hermes_agent.sh --case caller-file-secret "$HERMES_CALLER_FILE"
+
+      - name: Ironclaw source assertions
+        run: |
+          set -euo pipefail
           bash tests/test_ironclaw.sh --source-only
+
+      - name: Ironclaw sidecar security fixture
+        run: |
+          set -euo pipefail
           IRONCLAW_SIDECAR=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/ironclaw-sidecar")
           bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
+
+      - name: Ironclaw master-key fixture
+        run: |
+          set -euo pipefail
           IRONCLAW_KEY=$(bash tests/test_ironclaw.sh --build-key-fixture "$RUNNER_TEMP/ironclaw-key")
           bash tests/test_ironclaw.sh --case master-key-window "$IRONCLAW_KEY"
 
