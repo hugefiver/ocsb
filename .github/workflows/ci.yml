@@ -82,7 +82,14 @@ jobs:
           {
             printf 'IRONCLAW_SIDECAR=%s\n' "$IRONCLAW_SIDECAR"
             bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
-          } 2>&1 | tee "$LOG"
+          } > >(tee "$LOG") 2>&1 || {
+            rc=$?
+            {
+              printf 'Ironclaw sidecar security fixture failed (exit=%s). Last log lines:\n' "$rc"
+              tail -40 "$LOG" || true
+            } | sed 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g' | xargs -0 printf '::error file=tests/test_ironclaw.sh::%s\n'
+            exit "$rc"
+          }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
