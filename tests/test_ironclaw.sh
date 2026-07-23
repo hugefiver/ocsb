@@ -2038,7 +2038,7 @@ run_sidecar_security_case() {
   if [[ "$concurrency_fixed" -eq 1 ]]; then
     echo 'PASS[GREEN-sidecar-concurrency]: create_count=1 lock_probe=locked password_consistent'
   else
-    echo "FAIL[RED-sidecar-concurrency]: create_count=$create_count lock_probe=$lock_probe"
+    echo "FAIL[RED-sidecar-concurrency]: create_count=$create_count lock_probe=$lock_probe marker_fail=$marker_fail caller1_rc=$caller1_rc caller2_rc=$caller2_rc password_hash_count=$password_hash_count password_consistent=$password_consistent signal_lock_released=$signal_lock_released lock_fd_inherited=$([[ -e "$concurrency_state/LOCK_FD_INHERITED" ]] && printf 1 || printf 0) inner1_leak=$({ grep -Fq -- 'LOCK_FD_LEAK' "$concurrency_state/inner-1.log" 2>/dev/null && printf 1; } || printf 0) inner2_leak=$({ grep -Fq -- 'LOCK_FD_LEAK' "$concurrency_state/inner-2.log" 2>/dev/null && printf 1; } || printf 0)"
     marker_fail=1
   fi
   if [[ "$image_fixed" -eq 1 ]]; then
