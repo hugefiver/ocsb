@@ -5877,7 +5877,7 @@ int main(int argc, char **argv) {
     (void)fail_errno("mount anchoring unavailable: cannot restore current working directory", NULL);
     goto cleanup;
   }
-  if (close(runtime_root_fd) != 0) {
+  if (!configuration.bubblewrap_fd_sources && close(runtime_root_fd) != 0) {
     runtime_root_fd = -1;
     (void)fail_errno("mount anchoring unavailable: cannot close runtime directory", NULL);
     goto cleanup;
