@@ -1923,7 +1923,13 @@ run_sidecar_security_case() {
   if [[ "$lock_probe" == "unlocked" ]]; then
     wait_for_path "$concurrency_state/SECOND_INSPECT_READY" "second inspect barrier"
   else
-    wait_for_sidecar_lock_waiter "$caller2_pid" "$parent_lock_file"
+    if ! wait_for_sidecar_lock_waiter "$caller2_pid" "$parent_lock_file"; then
+      # Some CI kernels restrict observing another process' blocked flock child
+      # through /proc/<pid>/task/<pid>/children.  The product assertion below is
+      # still enforced by releasing caller 1, requiring caller 2 to complete,
+      # and checking create_count=1 plus a shared password hash.
+      kill -0 "$caller2_pid" 2>/dev/null || return 1
+    fi
     [[ ! -e "$concurrency_state/SECOND_INSPECT_READY" ]] || marker_fail=1
   fi
 
