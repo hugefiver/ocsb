@@ -1581,28 +1581,21 @@ static int id_map_covers_identity(const char *map_path, uintmax_t host_id) {
   return 0;
 }
 
-static int write_identity_map_or_root_fallback(const char *map_path, const char *identity_map_text,
-                                               const char *root_map_text, uintmax_t host_id,
+static int write_root_map_or_identity_fallback(const char *map_path, const char *root_map_text,
+                                               const char *identity_map_text, uintmax_t host_id,
                                                const char *stage) {
-  if (write_proc_file(map_path, identity_map_text) == 0) {
+  int saved_errno;
+
+  if (write_proc_file(map_path, root_map_text) == 0) {
     return 0;
   }
-  {
-    const int saved_errno = errno != 0 ? errno : EIO;
-
-    if (id_map_covers_identity(map_path, host_id) ||
-        podman_rootless_id_map_matches(map_path, host_id)) {
-      return 0;
-    }
-    if ((saved_errno == EACCES || saved_errno == EPERM) &&
-        write_proc_file(map_path, root_map_text) == 0) {
-      return 0;
-    }
-    if (podman_rootless_id_map_matches(map_path, host_id)) {
-      return 0;
-    }
-    errno = saved_errno;
+  saved_errno = errno != 0 ? errno : EIO;
+  if (write_proc_file(map_path, identity_map_text) == 0 ||
+      id_map_covers_identity(map_path, host_id) ||
+      podman_rootless_id_map_matches(map_path, host_id)) {
+    return 0;
   }
+  errno = saved_errno;
   return bubblewrap_failure_errno(stage);
 }
 
@@ -2505,12 +2498,12 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
       (size_t)root_gid_map_length >= sizeof(root_gid_map)) {
     return bubblewrap_failure("cannot format user namespace identity maps");
   }
-  if (write_identity_map_or_root_fallback("/proc/self/uid_map", uid_map, root_uid_map,
+  if (write_root_map_or_identity_fallback("/proc/self/uid_map", root_uid_map, uid_map,
                                           (uintmax_t)configuration->host_uid,
                                           "write /proc/self/uid_map") != 0) {
     return -1;
   }
-  if (write_identity_map_or_root_fallback("/proc/self/gid_map", gid_map, root_gid_map,
+  if (write_root_map_or_identity_fallback("/proc/self/gid_map", root_gid_map, gid_map,
                                           (uintmax_t)configuration->host_gid,
                                           "write /proc/self/gid_map") != 0) {
     return -1;

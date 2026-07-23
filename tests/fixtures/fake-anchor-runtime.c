@@ -495,8 +495,10 @@ static int validate_identity(const char *backend, int argc, char **argv) {
   int index;
 
   if (strcmp(backend, "bubblewrap") == 0) {
-    return require_pair(argc, argv, "--uid", uid) == 0 &&
-                   require_pair(argc, argv, "--gid", gid) == 0
+    return ((require_pair(argc, argv, "--uid", uid) == 0 &&
+             require_pair(argc, argv, "--gid", gid) == 0) ||
+            (require_pair(argc, argv, "--uid", "0") == 0 &&
+             require_pair(argc, argv, "--gid", "0") == 0))
                ? 0
                : -1;
   }
