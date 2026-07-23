@@ -117,7 +117,25 @@ jobs:
       - name: Wrapper runtime suite
         run: |
           set -euo pipefail
-          env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb"
+          LOG="$RUNNER_TEMP/wrapper-runtime.log"
+          set +e
+          env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb" 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            while IFS= read -r line; do
+              printf '::error title=Wrapper runtime suite::%s\n' "$line"
+            done < <(tail -120 "$LOG")
+            exit "$rc"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: wrapper-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/wrapper-runtime.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Wrapper runtime pidfile fixture
         run: |
