@@ -65,8 +65,10 @@ BUILD_JOB="$({
 })"
 
 # Core and deterministic suites must be invoked by the ordinary build job.
-require_workflow_runtime 'nix build --no-link --print-out-paths .#packages.x86_64-linux.default' \
-  'default package must be built without a result link'
+require_workflow_runtime 'DEFAULT_OUT="$RUNNER_TEMP/ocsb-default"' \
+  'default package out-link must be outside the repository'
+require_workflow_runtime 'nix build --out-link "$DEFAULT_OUT" .#packages.x86_64-linux.default' \
+  'default package must be built to a runner-temp out-link'
 require_workflow_runtime 'bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb"' \
   'wrapper runtime suite is missing'
 require_workflow_runtime 'bash tests/test_backend.sh .' \
@@ -77,10 +79,14 @@ require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_git_worktree.sh
   'git-worktree runtime suite must clear XDG_RUNTIME_DIR'
 require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_btrfs.sh "$DEFAULT_OUT/bin/ocsb"' \
   'btrfs runtime suite must clear XDG_RUNTIME_DIR'
-require_workflow_runtime 'nix build --no-link --print-out-paths .#checks.x86_64-linux.dual-layer-test' \
+require_workflow_runtime 'nix build --out-link "$DUAL_OUT" .#checks.x86_64-linux.dual-layer-test' \
   'default dual-layer fixture build is missing'
-require_workflow_runtime 'nix build --no-link --print-out-paths .#checks.x86_64-linux.dual-layer-home-test' \
+require_workflow_runtime 'nix build --out-link "$DUAL_HOME_OUT" .#checks.x86_64-linux.dual-layer-home-test' \
   'home dual-layer fixture build is missing'
+require_workflow_runtime 'DUAL_OUT="$RUNNER_TEMP/ocsb-dual-default"' \
+  'default dual-layer out-link must be outside the repository'
+require_workflow_runtime 'DUAL_HOME_OUT="$RUNNER_TEMP/ocsb-dual-home"' \
+  'home dual-layer out-link must be outside the repository'
 require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_dual_layer_host.sh green-env' \
   'dual-layer environment runtime case is missing'
 require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_dual_layer_host.sh green-sandboxdir' \
@@ -89,8 +95,10 @@ require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh
   'deterministic mount-anchor suite must run with XDG_RUNTIME_DIR cleared'
 require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --ci-fake' \
   'deterministic filtered-monitor suite must run with XDG_RUNTIME_DIR cleared'
-require_workflow_runtime 'nix build --no-link --print-out-paths .#checks.x86_64-linux.net-test' \
+require_workflow_runtime 'nix build --out-link "$NET_OUT" .#checks.x86_64-linux.net-test' \
   'network fixture build is missing'
+require_workflow_runtime 'NET_OUT="$RUNNER_TEMP/ocsb-net-test"' \
+  'network fixture out-link must be outside the repository'
 require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --case real-secondary' \
   'real network/cleanup suite must run with XDG_RUNTIME_DIR cleared'
 require_workflow_runtime 'bash tests/test_arch_outputs.sh "$AARCH_JSON" "$X86_JSON"' \
@@ -139,10 +147,12 @@ require_workflow_runtime \
   'env -u XDG_RUNTIME_DIR bash tests/test_ironclaw.sh "$IRONCLAW_OUT/bin/ocsb-ironclaw"' \
   'dedicated Ironclaw built-wrapper path is missing'
 
-# Every workflow Nix build must avoid mutable ./result collisions.
+# Every workflow Nix build must avoid mutable ./result collisions by using
+# explicit out-links. The critical runner-temp variables are checked above for
+# runtime paths that feed follow-up commands.
 while IFS= read -r build_line; do
-  if [[ "$build_line" != *'--no-link'* || "$build_line" != *'--print-out-paths'* ]]; then
-    fail "workflow nix build lacks --no-link --print-out-paths: $build_line"
+  if [[ "$build_line" != *'--out-link'* ]]; then
+    fail "workflow nix build lacks --out-link: $build_line"
   fi
 done < <(grep -E '^[[:space:]]*[^#]*nix build ' "$WORKFLOW" || true)
 
@@ -238,7 +248,8 @@ else
     'HOST_UID=$(id -u)' \
     'LOG="$RUNNER_TEMP/14-real-podman-green.log"' \
     'printf "PODMAN_BIN=%s\n" "$PODMAN_BIN" | tee "$LOG"' \
-    'nix build --no-link --print-out-paths .#packages.x86_64-linux.default' \
+    'OUT="$RUNNER_TEMP/ocsb-podman-anchor"' \
+    'nix build --out-link "$OUT" .#packages.x86_64-linux.default' \
     'env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh' \
     '--case real-rootless-podman "$OUT/bin/ocsb"' \
     'grep -Fq "PASS[GREEN-real-rootless-podman-anchor]: uid=$HOST_UID source=original"' \

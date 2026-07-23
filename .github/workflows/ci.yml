@@ -110,7 +110,8 @@ jobs:
       - name: Build default package for runtime suites
         run: |
           set -euo pipefail
-          DEFAULT_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
+          DEFAULT_OUT="$RUNNER_TEMP/ocsb-default"
+          nix build --out-link "$DEFAULT_OUT" .#packages.x86_64-linux.default
           printf 'DEFAULT_OUT=%s\n' "$DEFAULT_OUT" >> "$GITHUB_ENV"
 
       - name: Wrapper runtime suite
@@ -161,8 +162,10 @@ jobs:
       - name: Run dual-layer runtime suites
         run: |
           set -euo pipefail
-          DUAL_OUT=$(nix build --no-link --print-out-paths .#checks.x86_64-linux.dual-layer-test)
-          DUAL_HOME_OUT=$(nix build --no-link --print-out-paths .#checks.x86_64-linux.dual-layer-home-test)
+          DUAL_OUT="$RUNNER_TEMP/ocsb-dual-default"
+          DUAL_HOME_OUT="$RUNNER_TEMP/ocsb-dual-home"
+          nix build --out-link "$DUAL_OUT" .#checks.x86_64-linux.dual-layer-test
+          nix build --out-link "$DUAL_HOME_OUT" .#checks.x86_64-linux.dual-layer-home-test
           env -u XDG_RUNTIME_DIR bash tests/test_dual_layer_host.sh green-env "$DUAL_OUT/bin/ocsb-dual-test"
           env -u XDG_RUNTIME_DIR bash tests/test_dual_layer_host.sh green-sandboxdir "$DUAL_HOME_OUT/bin/ocsb-dual-home-test"
 
@@ -176,7 +179,8 @@ jobs:
       - name: Run architecture and failure-propagation contracts
         run: |
           set -euo pipefail
-          DEFAULT_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
+          DEFAULT_OUT="$RUNNER_TEMP/ocsb-default-arch"
+          nix build --out-link "$DEFAULT_OUT" .#packages.x86_64-linux.default
           AARCH_JSON="$RUNNER_TEMP/aarch64-attrs.json"
           X86_JSON="$RUNNER_TEMP/x86_64-attrs.json"
           nix eval --impure --json .#packages.aarch64-linux --apply builtins.attrNames > "$AARCH_JSON"
@@ -188,7 +192,8 @@ jobs:
       - name: Run capability-based network suite
         run: |
           set -euo pipefail
-          NET_OUT=$(nix build --no-link --print-out-paths .#checks.x86_64-linux.net-test)
+          NET_OUT="$RUNNER_TEMP/ocsb-net-test"
+          nix build --out-link "$NET_OUT" .#checks.x86_64-linux.net-test
           env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --case real-secondary "$NET_OUT/bin/ocsb-net-test"
 
   podman-anchor-test:
@@ -208,7 +213,8 @@ jobs:
             printf "PODMAN_BIN=%s\n" "$PODMAN_BIN" | tee "$LOG"
             test "$(podman info --format "{{.Host.Security.Rootless}}")" = true
             HOST_UID=$(id -u)
-            OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
+            OUT="$RUNNER_TEMP/ocsb-podman-anchor"
+            nix build --out-link "$OUT" .#packages.x86_64-linux.default
             env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh \
               --case real-rootless-podman "$OUT/bin/ocsb" \
               | tee -a "$LOG"
@@ -329,7 +335,8 @@ jobs:
         id: hermes
         run: |
           set -euo pipefail
-          HERMES_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.hermes-agent-sandbox --print-build-logs)
+          HERMES_OUT="$RUNNER_TEMP/hermes-agent-sandbox"
+          nix build --print-build-logs --out-link "$HERMES_OUT" .#packages.x86_64-linux.hermes-agent-sandbox
           echo "path=$HERMES_OUT" >> "$GITHUB_OUTPUT"
           env -u XDG_RUNTIME_DIR bash tests/test_hermes_agent.sh "$HERMES_OUT/bin/ocsb-hermes"
 
@@ -385,8 +392,10 @@ jobs:
         id: ironclaw
         run: |
           set -euo pipefail
-          IRONCLAW_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.ironclaw_${{ steps.attr.outputs.suffix }} --print-build-logs)
-          IRONCLAW_SANDBOX_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.ironclaw-sandbox_${{ steps.attr.outputs.suffix }} --print-build-logs)
+          IRONCLAW_OUT="$RUNNER_TEMP/ironclaw-${{ steps.attr.outputs.suffix }}"
+          IRONCLAW_SANDBOX_OUT="$RUNNER_TEMP/ironclaw-sandbox-${{ steps.attr.outputs.suffix }}"
+          nix build --print-build-logs --out-link "$IRONCLAW_OUT" .#packages.x86_64-linux.ironclaw_${{ steps.attr.outputs.suffix }}
+          nix build --print-build-logs --out-link "$IRONCLAW_SANDBOX_OUT" .#packages.x86_64-linux.ironclaw-sandbox_${{ steps.attr.outputs.suffix }}
           echo "package=$IRONCLAW_OUT" >> "$GITHUB_OUTPUT"
           echo "sandbox=$IRONCLAW_SANDBOX_OUT" >> "$GITHUB_OUTPUT"
 
@@ -432,5 +441,6 @@ jobs:
       - name: Build latest Ironclaw wrapper from cache and run real suite
         run: |
           set -euo pipefail
-          IRONCLAW_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.ironclaw-sandbox --print-build-logs)
+          IRONCLAW_OUT="$RUNNER_TEMP/ironclaw-sandbox-latest"
+          nix build --print-build-logs --out-link "$IRONCLAW_OUT" .#packages.x86_64-linux.ironclaw-sandbox
           env -u XDG_RUNTIME_DIR bash tests/test_ironclaw.sh "$IRONCLAW_OUT/bin/ocsb-ironclaw"
