@@ -77,8 +77,20 @@ jobs:
       - name: Ironclaw sidecar security fixture
         run: |
           set -euo pipefail
+          LOG="$RUNNER_TEMP/ironclaw-sidecar-security.log"
           IRONCLAW_SIDECAR=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/ironclaw-sidecar")
-          bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
+          {
+            printf 'IRONCLAW_SIDECAR=%s\n' "$IRONCLAW_SIDECAR"
+            bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
+          } 2>&1 | tee "$LOG"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ironclaw-sidecar-security-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ironclaw-sidecar-security.log
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Ironclaw master-key fixture
         run: |
