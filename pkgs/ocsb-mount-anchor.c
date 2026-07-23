@@ -1553,6 +1553,42 @@ static int podman_rootless_id_map_matches(const char *map_path, uintmax_t host_i
   return 0;
 }
 
+static int write_proc_file(const char *path, const char *text);
+static int bubblewrap_failure_errno(const char *stage);
+
+static int id_map_covers_identity(const char *map_path, uintmax_t host_id) {
+  FILE *map;
+  uintmax_t inside_id;
+  uintmax_t outside_id;
+  uintmax_t length;
+
+  map = fopen(map_path, "r");
+  if (map == NULL) {
+    return 0;
+  }
+  while (fscanf(map, "%" SCNuMAX " %" SCNuMAX " %" SCNuMAX, &inside_id, &outside_id,
+                &length) == 3) {
+    if (length != 0U && inside_id <= host_id && outside_id <= host_id &&
+        host_id - inside_id == host_id - outside_id && host_id - inside_id < length) {
+      (void)fclose(map);
+      return 1;
+    }
+  }
+  (void)fclose(map);
+  return 0;
+}
+
+static int write_identity_map_or_accept_existing(const char *map_path, const char *map_text,
+                                                 uintmax_t host_id, const char *stage) {
+  if (write_proc_file(map_path, map_text) == 0) {
+    return 0;
+  }
+  if ((errno == EACCES || errno == EPERM) && id_map_covers_identity(map_path, host_id)) {
+    return 0;
+  }
+  return bubblewrap_failure_errno(stage);
+}
+
 static int validate_backend_namespace(const struct configuration *configuration) {
   const uid_t current_uid = getuid();
   const gid_t current_gid = getgid();
@@ -2438,11 +2474,15 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
       (size_t)gid_map_length >= sizeof(gid_map)) {
     return bubblewrap_failure("cannot format user namespace identity maps");
   }
-  if (write_proc_file("/proc/self/uid_map", uid_map) != 0) {
-    return bubblewrap_failure_errno("write /proc/self/uid_map");
+  if (write_identity_map_or_accept_existing("/proc/self/uid_map", uid_map,
+                                            (uintmax_t)configuration->host_uid,
+                                            "write /proc/self/uid_map") != 0) {
+    return -1;
   }
-  if (write_proc_file("/proc/self/gid_map", gid_map) != 0) {
-    return bubblewrap_failure_errno("write /proc/self/gid_map");
+  if (write_identity_map_or_accept_existing("/proc/self/gid_map", gid_map,
+                                            (uintmax_t)configuration->host_gid,
+                                            "write /proc/self/gid_map") != 0) {
+    return -1;
   }
   if (getuid() != configuration->host_uid || getgid() != configuration->host_gid) {
     return bubblewrap_failure("user namespace identity changed unexpectedly");
