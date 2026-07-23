@@ -123,9 +123,19 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -ne 0 ]; then
-            while IFS= read -r line; do
-              printf '::error title=Wrapper runtime suite::%s\n' "$line"
-            done < <(tail -120 "$LOG")
+            SUMMARY="$RUNNER_TEMP/wrapper-runtime-summary.log"
+            {
+              printf 'wrapper runtime exit=%s\n' "$rc"
+              grep -Ev '^(copying path|warning: unknown setting)' "$LOG" | tail -160
+            } > "$SUMMARY"
+            msg=$(python3 - <<'PY' "$SUMMARY"
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(errors='replace')[-12000:]
+print(text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+PY
+)
+            printf '::error title=Wrapper runtime suite compact::%s\n' "$msg"
             exit "$rc"
           fi
 
