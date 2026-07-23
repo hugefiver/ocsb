@@ -81,7 +81,7 @@ jobs:
           IRONCLAW_SIDECAR=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/ironclaw-sidecar")
           {
             printf 'IRONCLAW_SIDECAR=%s\n' "$IRONCLAW_SIDECAR"
-            bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
+            timeout 240s bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
           } > >(tee "$LOG") 2>&1 || {
             rc=$?
             printf '::error file=tests/test_ironclaw.sh::Ironclaw sidecar security fixture failed (exit=%s)\n' "$rc"
