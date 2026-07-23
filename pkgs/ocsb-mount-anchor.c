@@ -2424,7 +2424,8 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
   if (unshare(CLONE_NEWUSER) != 0) {
     return bubblewrap_failure_errno("unshare(CLONE_NEWUSER)");
   }
-  if (write_proc_file("/proc/self/setgroups", "deny\n") != 0) {
+  if (write_proc_file("/proc/self/setgroups", "deny\n") != 0 && errno != ENOENT &&
+      errno != EACCES && errno != EPERM) {
     return bubblewrap_failure_errno("write /proc/self/setgroups");
   }
   uid_map_length = snprintf(uid_map, sizeof(uid_map), "%" PRIuMAX " %" PRIuMAX " 1\n",
