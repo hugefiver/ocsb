@@ -191,6 +191,7 @@ struct source_spec {
   int source_fd;
   bool absent;
   bool consumed_by_overlay;
+  bool fd_anchor;
   char *anchor_path;
 };
 
@@ -229,6 +230,7 @@ struct configuration {
   uid_t host_uid;
   gid_t host_gid;
   bool bubblewrap_rewrite_identity;
+  bool bubblewrap_fd_sources;
   uid_t bubblewrap_uid;
   gid_t bubblewrap_gid;
   char *anchor_root;
@@ -2472,6 +2474,10 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
   int root_uid_map_length;
   int root_gid_map_length;
 
+  if (configuration->bubblewrap_fd_sources && configuration->inherited_root_count == 0U) {
+    (void)original_cwd_fd;
+    return 0;
+  }
   if (unshare(CLONE_NEWUSER |
               (configuration->inherited_root_count == 0U ? CLONE_NEWNS : 0)) != 0) {
     return configuration->inherited_root_count == 0U
@@ -2515,6 +2521,9 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
   }
   if (configuration->inherited_root_count != 0U) {
     return translate_inherited_roots_into_bubblewrap_namespace(configuration, original_cwd_fd);
+  }
+  if (configuration->bubblewrap_fd_sources) {
+    return 0;
   }
   return establish_bubblewrap_mount_namespace("/", configuration->inherited_root_count == 0U);
 }
@@ -5237,6 +5246,44 @@ static int create_anchors(struct configuration *configuration, const char *run_n
   return 0;
 }
 
+static int create_fd_anchors(struct configuration *configuration) {
+  size_t index;
+
+  for (index = 0U; index < configuration->source_count; ++index) {
+    struct source_spec *source = &configuration->sources[index];
+    char source_fd_path[64];
+    int flags;
+    int source_fd_path_length;
+
+    if (source->absent) {
+      continue;
+    }
+    if (source->source_fd < 0) {
+      errorf("mount anchoring unavailable: source descriptor is unavailable: %s",
+             source->absolute_path);
+      return -1;
+    }
+    flags = fcntl(source->source_fd, F_GETFD);
+    if (flags < 0 || fcntl(source->source_fd, F_SETFD, flags & ~FD_CLOEXEC) != 0) {
+      return fail_errno("mount anchoring unavailable: cannot preserve source descriptor for bwrap",
+                        source->absolute_path);
+    }
+    source_fd_path_length =
+        snprintf(source_fd_path, sizeof(source_fd_path), "/proc/self/fd/%d", source->source_fd);
+    if (source_fd_path_length < 0 || (size_t)source_fd_path_length >= sizeof(source_fd_path)) {
+      errorf("cannot format source descriptor path");
+      return -1;
+    }
+    source->anchor_path = strdup(source_fd_path);
+    if (source->anchor_path == NULL) {
+      errorf("cannot allocate source descriptor anchor path");
+      return -1;
+    }
+    source->fd_anchor = true;
+  }
+  return 0;
+}
+
 static int close_source_fds(struct configuration *configuration) {
   size_t index;
 
@@ -5320,6 +5367,19 @@ static bool is_consumed_overlay_anchor_path(const struct configuration *configur
 
     if (source->consumed_by_overlay && source->anchor_path != NULL &&
         strcmp(source->anchor_path, path) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool is_source_anchor_path(const struct configuration *configuration, const char *path) {
+  size_t index;
+
+  for (index = 0U; index < configuration->source_count; ++index) {
+    const struct source_spec *source = &configuration->sources[index];
+
+    if (!source->absent && source->anchor_path != NULL && strcmp(source->anchor_path, path) == 0) {
       return true;
     }
   }
@@ -5522,7 +5582,7 @@ static int build_backend_argv(const struct configuration *configuration, char **
       deleted_sources[source_index] = true;
     }
   }
-  if (configuration->backend == BACKEND_BUBBLEWRAP &&
+  if (configuration->backend == BACKEND_BUBBLEWRAP && !configuration->bubblewrap_fd_sources &&
       collapse_bubblewrap_overlay_groups(configuration, arguments, &argument_count) != 0) {
     goto failure;
   }
@@ -5533,11 +5593,13 @@ static int build_backend_argv(const struct configuration *configuration, char **
       errorf("leftover source token in rewritten backend argv");
       goto failure;
     }
-    if (contains_proc_fd_path(arguments[index])) {
+    if (contains_proc_fd_path(arguments[index]) &&
+        !(configuration->backend == BACKEND_BUBBLEWRAP && configuration->bubblewrap_fd_sources &&
+          is_source_anchor_path(configuration, arguments[index]))) {
       errorf("rewritten backend argv contains forbidden /proc/*/fd/ path");
       goto failure;
     }
-    if (configuration->backend == BACKEND_BUBBLEWRAP &&
+    if (configuration->backend == BACKEND_BUBBLEWRAP && !configuration->bubblewrap_fd_sources &&
         (is_overlay_src_option(arguments[index]) || is_overlay_option(arguments[index]))) {
       (void)bubblewrap_failure("rewritten backend argv contains an unsafe overlay argument");
       goto failure;
@@ -5696,6 +5758,10 @@ int main(int argc, char **argv) {
   if (parse_cli(argc, argv, &configuration) != 0) {
     goto cleanup;
   }
+  configuration.bubblewrap_fd_sources =
+      configuration.backend == BACKEND_BUBBLEWRAP && configuration.inherited_root_count == 0U &&
+      getenv("OCSB_BWRAP_FD_SOURCES") != NULL &&
+      strcmp(getenv("OCSB_BWRAP_FD_SOURCES"), "1") == 0;
   if (configuration.mutation_only) {
     if (execute_workspace_mutation(&configuration) == 0) {
       result = 0;
@@ -5767,7 +5833,8 @@ int main(int argc, char **argv) {
     (void)fail_errno("mount anchoring unavailable: cannot preserve current working directory", NULL);
     goto cleanup;
   }
-  if (setup_namespace(&configuration, &original_cwd_fd) != 0) {
+  if (!configuration.bubblewrap_fd_sources &&
+      setup_namespace(&configuration, &original_cwd_fd) != 0) {
     goto cleanup;
   }
   if (close(runtime_root_fd) != 0) {
@@ -5777,8 +5844,9 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   runtime_root_fd = -1;
-  if (reopen_anchor_root_in_namespace(&configuration, &root_stat, &runtime_root_fd) != 0 ||
-      mount_anchor_tmpfs(runtime_root_fd, &anchors_stat) != 0) {
+  if (!configuration.bubblewrap_fd_sources &&
+      (reopen_anchor_root_in_namespace(&configuration, &root_stat, &runtime_root_fd) != 0 ||
+       mount_anchor_tmpfs(runtime_root_fd, &anchors_stat) != 0)) {
     goto cleanup;
   }
 #ifdef OCSB_MOUNT_ANCHOR_TEST_HOOKS
@@ -5794,12 +5862,15 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
   if (open_sources(&configuration) != 0 ||
-      format_run_name(run_name) != 0 || create_run_anchor_directory(run_name) != 0 ||
-      compose_bubblewrap_overlays(&configuration, run_name) != 0 ||
-      create_anchors(&configuration, run_name) != 0) {
+      (!configuration.bubblewrap_fd_sources &&
+       (format_run_name(run_name) != 0 || create_run_anchor_directory(run_name) != 0 ||
+        compose_bubblewrap_overlays(&configuration, run_name) != 0 ||
+        create_anchors(&configuration, run_name) != 0)) ||
+      (configuration.bubblewrap_fd_sources && create_fd_anchors(&configuration) != 0)) {
     goto cleanup;
   }
-  if (close_source_fds(&configuration) != 0 || close_inherited_root_fds(&configuration) != 0) {
+  if ((!configuration.bubblewrap_fd_sources && close_source_fds(&configuration) != 0) ||
+      close_inherited_root_fds(&configuration) != 0) {
     goto cleanup;
   }
   if (fchdir(original_cwd_fd) != 0) {
