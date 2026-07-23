@@ -84,10 +84,12 @@ jobs:
             bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
           } > >(tee "$LOG") 2>&1 || {
             rc=$?
-            {
-              printf 'Ironclaw sidecar security fixture failed (exit=%s). Last log lines:\n' "$rc"
-              tail -40 "$LOG" || true
-            } | sed 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g' | xargs -0 printf '::error file=tests/test_ironclaw.sh::%s\n'
+            printf '::error file=tests/test_ironclaw.sh::Ironclaw sidecar security fixture failed (exit=%s)\n' "$rc"
+            tail -40 "$LOG" 2>/dev/null | while IFS= read -r line; do
+              line="''${line//'%'/'%25'}"
+              line="''${line//$'\r'/'%0D'}"
+              printf '::error file=tests/test_ironclaw.sh::%s\n' "$line"
+            done
             exit "$rc"
           }
 
