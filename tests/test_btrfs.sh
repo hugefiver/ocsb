@@ -9,9 +9,37 @@ if ! command -v btrfs &>/dev/null; then
 fi
 
 TMPDIR="$(mktemp -d)"
+cleanup_path() {
+  local path="$1"
+
+  [[ -n "$path" && -e "$path" ]] || return 0
+  find "$path" -type d -exec chmod u+w {} + 2>/dev/null || true
+  if btrfs subvolume show "$path" &>/dev/null 2>&1; then
+    btrfs subvolume delete "$path" &>/dev/null 2>&1 || true
+  fi
+  rm -rf "$path" 2>/dev/null || true
+  [[ ! -e "$path" ]] || {
+    echo "FAIL: btrfs fixture cleanup left $path" >&2
+    return 1
+  }
+}
+
 cleanup() {
+  local status=$?
+
+  cleanup_path "${SNAP_STATE:-}" || status=1
+  cleanup_path "${SNAP_DIR:-}" || status=1
+  cleanup_path "${SNAP_MOUNT_SRC:-}" || status=1
+  cleanup_path "${PROBE_SNAP:-}" || status=1
+  cleanup_path "${BTRFS_VOL:-}" || status=1
   find "$TMPDIR" -type d -exec chmod u+w {} + 2>/dev/null || true
-  rm -rf "$TMPDIR"
+  rm -rf "$TMPDIR" 2>/dev/null || true
+  if [[ -e "$TMPDIR" ]]; then
+    echo "FAIL: btrfs fixture cleanup left $TMPDIR" >&2
+    status=1
+  fi
+  trap - EXIT
+  exit "$status"
 }
 trap cleanup EXIT
 export OCSB_STATE_BASE_DIR="$TMPDIR/state"
@@ -46,34 +74,49 @@ echo "=== btrfs strategy test ==="
 echo "test-content" > "$PROJECT_DIR/testfile.txt"
 
 # SKIP if btrfs strategy unusable (e.g. plain btrfs without user_subvol_rm_allowed).
-PROBE_OUT="$(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-probe" --strategy btrfs --overwrite -- -c true 2>&1 || true)"
+PROBE_SNAP="$PROJECT_DIR/.ocsb/btrfs-probe/snapshot"
+set +e
+PROBE_OUT="$(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-probe" --strategy btrfs --overwrite -- -c true 2>&1)"
+PROBE_STATUS=$?
+set -e
 if echo "$PROBE_OUT" | grep -q "btrfs strategy unavailable"; then
+  if [[ "$PROBE_STATUS" -eq 0 ]]; then
+    echo "FAIL: unavailable btrfs probe unexpectedly exited zero" >&2
+    exit 1
+  fi
   echo "SKIP: btrfs strategy unavailable in this environment"
   echo "  reason: $(echo "$PROBE_OUT" | grep "btrfs strategy unavailable" | head -1)"
   exit 0
 fi
-rm -rf "$PROJECT_DIR/.ocsb/btrfs-probe" 2>/dev/null || true
-
-(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --overwrite -- -c true 2>/dev/null) || true
+if [[ "$PROBE_STATUS" -ne 0 ]]; then
+  echo "FAIL: btrfs capability probe exited $PROBE_STATUS without the expected unavailable diagnostic" >&2
+  printf '%s\n' "$PROBE_OUT" >&2
+  exit 1
+fi
+cleanup_path "$PROBE_SNAP"
+rm -rf "$PROJECT_DIR/.ocsb/btrfs-probe"
+test ! -e "$PROJECT_DIR/.ocsb/btrfs-probe"
 
 SNAP_DIR="$PROJECT_DIR/.ocsb/btrfs-test/snapshot"
+(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --overwrite -- -c true 2>/dev/null)
+
 assert "snapshot directory created" [ -d "$SNAP_DIR" ]
 assert "snapshot contains project files" [ -f "$SNAP_DIR/testfile.txt" ]
 
-(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --continue -- -c true 2>/dev/null) || true
+(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --continue -- -c true 2>/dev/null)
 assert "continue reuses existing snapshot" [ -d "$SNAP_DIR" ]
 
-(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --overwrite -- -c true 2>/dev/null) || true
+(cd "$PROJECT_DIR" && "$OCSB_BIN" -w "btrfs-test" --strategy btrfs --overwrite -- -c true 2>/dev/null)
 assert "overwrite recreates snapshot" [ -d "$SNAP_DIR" ]
 
 SNAP_MOUNT_SRC="$TMPDIR/snap-mount-src"
 if btrfs subvolume create "$SNAP_MOUNT_SRC" &>/dev/null; then
   echo "snap-mount-data" > "$SNAP_MOUNT_SRC/marker.txt"
-  (cd "$PROJECT_DIR" && "$OCSB_BIN" -w "snap-mount-test" --strategy direct --overwrite \
-    --snap-mount "$SNAP_MOUNT_SRC:/workspace/snap-data" -- \
-    -c 'cat /workspace/snap-data/marker.txt >/dev/null') || true
   SNAP_HASH="$(echo -n "$SNAP_MOUNT_SRC" | sha256sum | cut -c1-12)"
   SNAP_STATE="$OCSB_STATE_BASE_DIR/snap-mount-test/snapshots/snap-$SNAP_HASH"
+  (cd "$PROJECT_DIR" && "$OCSB_BIN" -w "snap-mount-test" --strategy direct --overwrite \
+    --snap-mount "$SNAP_MOUNT_SRC:/workspace/snap-data" -- \
+    -c 'cat /workspace/snap-data/marker.txt >/dev/null')
   assert "snap-mount state under snapshots" [ -d "$SNAP_STATE" ]
   assert "snap-mount snapshot contains source file" [ -f "$SNAP_STATE/marker.txt" ]
   assert "snap-mount has no legacy root snapshot state" [ ! -d "$OCSB_STATE_BASE_DIR/snap-mount-test/snap-$SNAP_HASH" ]
@@ -81,9 +124,11 @@ else
   echo "  SKIP: cannot create btrfs subvolume for snap-mount regression"
 fi
 
-btrfs subvolume delete "$SNAP_DIR" 2>/dev/null || rm -rf "$SNAP_DIR"
-btrfs subvolume delete "$SNAP_MOUNT_SRC" 2>/dev/null || rm -rf "$SNAP_MOUNT_SRC"
+cleanup_path "${SNAP_STATE:-}"
+cleanup_path "$SNAP_DIR"
+cleanup_path "$SNAP_MOUNT_SRC"
 rm -rf "$PROJECT_DIR/.ocsb/btrfs-test"
+test ! -e "$PROJECT_DIR/.ocsb/btrfs-test"
 
 echo ""
 echo "=== btrfs Results: $PASS passed, $FAIL failed ==="

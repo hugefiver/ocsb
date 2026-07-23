@@ -4,6 +4,10 @@
 
 let
   pgWithExt = pkgs.postgresql_18.withPackages (p: [ p.pgvector ]);
+  createMasterKey = import ../lib/ironclaw-master-key.nix {
+    inherit pkgs;
+    target = "/var/lib/ironclaw/master_key.hex";
+  };
 in
 {
   # nixStoreMode defaults to "chroot" — sandbox gets a real, writable
@@ -99,10 +103,7 @@ in
       # hex-encoded = 64 chars; ironclaw treats env-var presence as authoritative
       # and returns early from step_security().
       _MK_FILE=/var/lib/ironclaw/master_key.hex
-      if [ ! -s "$_MK_FILE" ]; then
-        ${pkgs.openssl}/bin/openssl rand -hex 32 > "$_MK_FILE"
-        chmod 0600 "$_MK_FILE"
-      fi
+      ${createMasterKey}
       export SECRETS_MASTER_KEY="$(cat "$_MK_FILE")"
     '';
   };

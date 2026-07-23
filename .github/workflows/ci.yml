@@ -40,14 +40,174 @@ jobs:
       - name: Check flake
         run: nix flake check --no-build
 
-      - name: Build default package
-        run: nix build .#packages.x86_64-linux.default
+      - name: Run external wrapper source and lightweight suites
+        run: |
+          set -euo pipefail
+          bash tests/test_hermes_agent.sh --source-only
+          HERMES_GATEWAY=$(bash tests/test_hermes_agent.sh --build-service-fixture "$RUNNER_TEMP/hermes-gateway")
+          bash tests/test_hermes_agent.sh --case gateway-reservation "$HERMES_GATEWAY"
+          HERMES_DEAD_CANDIDATE=$(bash tests/test_hermes_agent.sh --build-service-fixture "$RUNNER_TEMP/hermes-dead-candidate")
+          bash tests/test_hermes_agent.sh --case gateway-dead-candidate "$HERMES_DEAD_CANDIDATE"
+          HERMES_REPLACE=$(bash tests/test_hermes_agent.sh --build-lightweight-wrapper "$RUNNER_TEMP/hermes-replace")
+          bash tests/test_hermes_agent.sh --case replace-identity "$HERMES_REPLACE"
+          HERMES_CALLER_FILE=$(bash tests/test_hermes_agent.sh --build-lightweight-wrapper "$RUNNER_TEMP/hermes-caller-file")
+          bash tests/test_hermes_agent.sh --case caller-file-secret "$HERMES_CALLER_FILE"
+          bash tests/test_ironclaw.sh --source-only
+          IRONCLAW_SIDECAR=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/ironclaw-sidecar")
+          bash tests/test_ironclaw.sh --case sidecar-security "$IRONCLAW_SIDECAR"
+          IRONCLAW_KEY=$(bash tests/test_ironclaw.sh --build-key-fixture "$RUNNER_TEMP/ironclaw-key")
+          bash tests/test_ironclaw.sh --case master-key-window "$IRONCLAW_KEY"
 
-      - name: Build network test variant
-        run: nix build .#checks.x86_64-linux.net-test
+      - name: Run core runtime suites
+        run: |
+          set -euo pipefail
+           DEFAULT_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
+           env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb"
+           env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb" --case runtime-pidfile-clobber
+           bash tests/test_backend.sh .
+           bash tests/test_backend.sh . --case process-record-schema
+           bash tests/test_backend.sh . --case container-rootfs-persistence
+           bash tests/test_backend.sh . --case generic-daemon-pip
+          bash tests/test_binpath.sh .
+          env -u XDG_RUNTIME_DIR bash tests/test_git_worktree.sh "$DEFAULT_OUT/bin/ocsb"
+          env -u XDG_RUNTIME_DIR bash tests/test_btrfs.sh "$DEFAULT_OUT/bin/ocsb"
 
-      - name: Build dual-layer test variant
-        run: nix build .#checks.x86_64-linux.dual-layer-test
+      - name: Run dual-layer runtime suites
+        run: |
+          set -euo pipefail
+          DUAL_OUT=$(nix build --no-link --print-out-paths .#checks.x86_64-linux.dual-layer-test)
+          DUAL_HOME_OUT=$(nix build --no-link --print-out-paths .#checks.x86_64-linux.dual-layer-home-test)
+          env -u XDG_RUNTIME_DIR bash tests/test_dual_layer_host.sh green-env "$DUAL_OUT/bin/ocsb-dual-test"
+          env -u XDG_RUNTIME_DIR bash tests/test_dual_layer_host.sh green-sandboxdir "$DUAL_HOME_OUT/bin/ocsb-dual-home-test"
+
+      - name: Run deterministic runtime suites
+        run: |
+          set -euo pipefail
+          env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh --ci-fake
+          env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --ci-fake
+          bash tests/test_ci_runtime.sh
+
+      - name: Run architecture and failure-propagation contracts
+        run: |
+          set -euo pipefail
+          DEFAULT_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
+          AARCH_JSON="$RUNNER_TEMP/aarch64-attrs.json"
+          X86_JSON="$RUNNER_TEMP/x86_64-attrs.json"
+          nix eval --impure --json .#packages.aarch64-linux --apply builtins.attrNames > "$AARCH_JSON"
+          nix eval --impure --json .#packages.x86_64-linux --apply builtins.attrNames > "$X86_JSON"
+          bash tests/test_arch_outputs.sh "$AARCH_JSON" "$X86_JSON"
+          FAILURE_DELEGATE=$(bash tests/test_failure_propagation.sh --prepare "$RUNNER_TEMP/failure-fixture" "$DEFAULT_OUT/bin/ocsb")
+          env -u XDG_RUNTIME_DIR bash tests/test_failure_propagation.sh --case strategy-create "$FAILURE_DELEGATE"
+
+      - name: Run capability-based network suite
+        run: |
+          set -euo pipefail
+          NET_OUT=$(nix build --no-link --print-out-paths .#checks.x86_64-linux.net-test)
+          env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --case real-secondary "$NET_OUT/bin/ocsb-net-test"
+
+  podman-anchor-test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a
+      - name: Verify real rootless Podman mount anchoring
+        run: |
+          set -euo pipefail
+          nix develop .#backend-test -c bash -c '
+            set -euo pipefail
+            PODMAN_BIN=$(command -v podman)
+            case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
+            LOG="$RUNNER_TEMP/14-real-podman-green.log"
+            printf "PODMAN_BIN=%s\n" "$PODMAN_BIN" | tee "$LOG"
+            test "$(podman info --format "{{.Host.Security.Rootless}}")" = true
+            HOST_UID=$(id -u)
+            OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.default)
+            env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh \
+              --case real-rootless-podman "$OUT/bin/ocsb" \
+              | tee -a "$LOG"
+            grep -Fq "PASS[GREEN-real-rootless-podman-anchor]: uid=$HOST_UID source=original" \
+              "$LOG"
+          '
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: rootless-podman-anchor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/14-real-podman-green.log
+          if-no-files-found: error
+          retention-days: 14
+
+  podman-sidecar-lifecycle-test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a
+      - name: Verify native rootless Podman sidecar lifecycle
+        run: |
+          set -euo pipefail
+          nix develop .#backend-test -c bash -c '
+            set -euo pipefail
+            IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
+            PODMAN_BIN=$(command -v podman)
+            case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
+            test "$(podman --remote=false info --format "{{.Host.Security.Rootless}}")" = true
+            LOG="$RUNNER_TEMP/19-native-podman-sidecar-green.log"
+            podman --remote=false pull "$IMAGE"
+            IMAGE_ID=$(podman --remote=false image inspect "$IMAGE" --format "{{.Id}}")
+            REPODIGESTS=$(podman --remote=false image inspect "$IMAGE" --format "{{json .RepoDigests}}")
+            test -n "$IMAGE_ID"
+            printf "%s" "$REPODIGESTS" | grep -Fq "sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0"
+            printf "%s\n" "PINNED_IMAGE_RUNTIME=podman" "PINNED_IMAGE_REQUEST=$IMAGE" "PINNED_IMAGE_ID=$IMAGE_ID" "PINNED_IMAGE_REPODIGESTS=$REPODIGESTS" > "$LOG"
+            WRAPPER=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/native-podman-wrapper")
+            OCSB_NATIVE_PODMAN_REQUIRED=1 bash tests/test_ironclaw.sh --case native-sidecar-lifecycle podman "$WRAPPER" | tee -a "$LOG"
+            grep -Fq "PASS[GREEN-sidecar-native-podman-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env" "$LOG"
+            grep -Fq "CLEANUP PASS: native podman sidecar container processes persist cidfiles fifos outlinks mounts removed" "$LOG"
+          '
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: final-review-podman-sidecar-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/19-native-podman-sidecar-green.log
+          if-no-files-found: error
+          retention-days: 14
+
+  docker-sidecar-lifecycle-test:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a
+      - name: Verify native Docker sidecar lifecycle
+        run: |
+          set -euo pipefail
+          DOCKER_BIN=$(command -v docker)
+          case "$DOCKER_BIN" in /usr/bin/docker|/bin/docker|*/docker) ;; *) printf "unexpected docker: %s\n" "$DOCKER_BIN" >&2; exit 1 ;; esac
+          docker info >/dev/null
+          ENDPOINT=$(docker context inspect --format '{{(index .Endpoints "docker").Host}}')
+          case "$ENDPOINT" in unix://*) ;; *) printf 'non-local Docker endpoint: %s\n' "$ENDPOINT" >&2; exit 1 ;; esac
+          IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
+          LOG="$RUNNER_TEMP/19-native-docker-sidecar-green.log"
+          docker pull "$IMAGE"
+          IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}')
+          REPODIGESTS=$(docker image inspect "$IMAGE" --format '{{json .RepoDigests}}')
+          test -n "$IMAGE_ID"
+          printf '%s' "$REPODIGESTS" | grep -Fq 'sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0'
+          printf '%s\n' "PINNED_IMAGE_RUNTIME=docker" "PINNED_IMAGE_REQUEST=$IMAGE" "PINNED_IMAGE_ID=$IMAGE_ID" "PINNED_IMAGE_REPODIGESTS=$REPODIGESTS" > "$LOG"
+          WRAPPER=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/native-docker-wrapper")
+          OCSB_NATIVE_DOCKER_REQUIRED=1 bash tests/test_ironclaw.sh --case native-sidecar-lifecycle docker "$WRAPPER" | tee -a "$LOG"
+          grep -Fq 'PASS[GREEN-sidecar-native-docker-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env' "$LOG"
+          grep -Fq 'CLEANUP PASS: native docker sidecar container processes persist cidfiles fifos outlinks mounts removed' "$LOG"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: final-review-docker-sidecar-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/19-native-docker-sidecar-green.log
+          if-no-files-found: error
+          retention-days: 14
 
   hermes-build:
     runs-on: ubuntu-latest
@@ -79,13 +239,17 @@ jobs:
           gc-max-store-size-linux: 5G
           upload-chunk-size: 67108864
 
-      - name: Build hermes-agent-sandbox
-        run: nix build .#packages.x86_64-linux.hermes-agent-sandbox --print-build-logs
+      - name: Build and test hermes-agent-sandbox
+        id: hermes
+        run: |
+          set -euo pipefail
+          HERMES_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.hermes-agent-sandbox --print-build-logs)
+          echo "path=$HERMES_OUT" >> "$GITHUB_OUTPUT"
+          env -u XDG_RUNTIME_DIR bash tests/test_hermes_agent.sh "$HERMES_OUT/bin/ocsb-hermes"
 
       - name: Push to cachix
         if: env.CACHIX_AUTH_TOKEN != ''
-        run: |
-          nix path-info --recursive ./result | cachix push hugefiver
+        run: nix path-info --recursive '${{ steps.hermes.outputs.path }}' | cachix push hugefiver
 
   ironclaw-build:
     runs-on: ubuntu-latest
@@ -131,20 +295,26 @@ jobs:
             echo "suffix=${{ matrix.version }}_${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build ironclaw_${{ steps.attr.outputs.suffix }}
-        run: nix build .#packages.x86_64-linux.ironclaw_${{ steps.attr.outputs.suffix }} --print-build-logs
-
-      - name: Build ironclaw-sandbox_${{ steps.attr.outputs.suffix }}
-        run: nix build .#packages.x86_64-linux.ironclaw-sandbox_${{ steps.attr.outputs.suffix }} --print-build-logs
+      - name: Build Ironclaw application and wrapper
+        id: ironclaw
+        run: |
+          set -euo pipefail
+          IRONCLAW_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.ironclaw_${{ steps.attr.outputs.suffix }} --print-build-logs)
+          IRONCLAW_SANDBOX_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.ironclaw-sandbox_${{ steps.attr.outputs.suffix }} --print-build-logs)
+          echo "package=$IRONCLAW_OUT" >> "$GITHUB_OUTPUT"
+          echo "sandbox=$IRONCLAW_SANDBOX_OUT" >> "$GITHUB_OUTPUT"
 
       - name: Push to cachix
         if: env.CACHIX_AUTH_TOKEN != ''
         run: |
-          nix path-info --recursive ./result | cachix push hugefiver
+          nix path-info --recursive \
+            '${{ steps.ironclaw.outputs.package }}' \
+            '${{ steps.ironclaw.outputs.sandbox }}' \
+            | cachix push hugefiver
 
   ironclaw-test:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, ironclaw-build]
     timeout-minutes: 30
     env:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -173,8 +343,8 @@ jobs:
           gc-max-store-size-linux: 5G
           upload-chunk-size: 67108864
 
-      - name: Build ironclaw-sandbox (latest baseline, from cache)
-        run: nix build .#packages.x86_64-linux.ironclaw-sandbox --print-build-logs
-
-      - name: Run ironclaw smoke test
-        run: bash tests/test_ironclaw.sh ./result/bin/ocsb-ironclaw
+      - name: Build latest Ironclaw wrapper from cache and run real suite
+        run: |
+          set -euo pipefail
+          IRONCLAW_OUT=$(nix build --no-link --print-out-paths .#packages.x86_64-linux.ironclaw-sandbox --print-build-logs)
+          env -u XDG_RUNTIME_DIR bash tests/test_ironclaw.sh "$IRONCLAW_OUT/bin/ocsb-ironclaw"

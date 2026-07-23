@@ -37,11 +37,28 @@ assert_fails() {
   fi
 }
 
-OCSB_BIN="${1:?Usage: $0 <path-to-ocsb-binary>}"
+OCSB_BIN="${1:?Usage: $0 <path-to-ocsb-binary> [--case NAME]}"
+shift
+TEST_CASE="all"
+if [[ $# -gt 0 ]]; then
+  if [[ $# -ne 2 || "$1" != "--case" ]]; then
+    echo "Usage: $0 <path-to-ocsb-binary> [--case NAME]" >&2
+    exit 2
+  fi
+  TEST_CASE="$2"
+fi
 TMPDIR="$(mktemp -d)"
 cleanup() {
+  local status=$?
+
   find "$TMPDIR" -type d -exec chmod u+w {} + 2>/dev/null || true
-  rm -rf "$TMPDIR"
+  rm -rf "$TMPDIR" || status=1
+  if [[ -e "$TMPDIR" ]]; then
+    echo "FAIL: wrapper fixture cleanup left $TMPDIR" >&2
+    status=1
+  fi
+  trap - EXIT
+  exit "$status"
 }
 trap cleanup EXIT
 export OCSB_STATE_BASE_DIR="$TMPDIR/state"
@@ -49,6 +66,55 @@ export OCSB_STATE_BASE_DIR="$TMPDIR/state"
 PROJECT_DIR="$TMPDIR/project"
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
+
+runtime_pidfile_clobber_case() {
+  local xdg_dir="$TMPDIR/xdg-runtime"
+  local runtime_dir="$xdg_dir/ocsb"
+  local workspace_name="runtime-pidfile-clobber"
+  local instance_path instance record canary expected actual rc
+
+  install -d -m 0700 "$xdg_dir" "$runtime_dir"
+  instance_path="$(realpath -m "$OCSB_STATE_BASE_DIR/$workspace_name")"
+  instance="$(printf 'sandbox:ocsb\0%s' "$instance_path" | sha256sum | cut -d ' ' -f1)"
+  record="$runtime_dir/process-$instance.pid"
+  canary="$TMPDIR/runtime-pidfile-canary"
+  expected="canary-unchanged-$$"
+  printf '%s\n' "$expected" > "$canary"
+  ln -s "$canary" "$runtime_dir/ocsb.pid"
+  ln -s "$canary" "$record"
+
+  set +e
+  XDG_RUNTIME_DIR="$xdg_dir" "$OCSB_BIN" \
+    -w "$workspace_name" --strategy direct --overwrite -- -c true \
+    >"$TMPDIR/runtime-pidfile.stdout" 2>"$TMPDIR/runtime-pidfile.stderr"
+  rc=$?
+  set -e
+
+  actual="$(cat "$canary")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "FAIL[RED-runtime-pidfile-clobber]: launcher followed pidfile symlink and changed canary" >&2
+    return 1
+  fi
+  if [[ "$rc" -eq 0 ]]; then
+    echo "FAIL: launcher accepted a symlink process record" >&2
+    return 1
+  fi
+
+  echo "PASS[GREEN-runtime-pidfile-clobber]: unsafe record rejected; canary unchanged"
+}
+
+if [[ "$TEST_CASE" != "all" ]]; then
+  case "$TEST_CASE" in
+    runtime-pidfile-clobber)
+      runtime_pidfile_clobber_case
+      exit 0
+      ;;
+    *)
+      echo "unknown test case: $TEST_CASE" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 echo "=== ocsb wrapper test suite ==="
 echo "  binary: $OCSB_BIN"
@@ -125,7 +191,7 @@ echo ""
 echo "--- strategy marker ---"
 
 # Create workspace with direct strategy
-"$OCSB_BIN" -w "strat-test" --strategy direct --overwrite -- -c true 2>/dev/null || true
+"$OCSB_BIN" -w "strat-test" --strategy direct --overwrite -- -c true 2>/dev/null
 
 # --continue with different strategy should fail
 assert_fails "rejects --continue with mismatched strategy" \
@@ -145,7 +211,7 @@ echo ""
 # --- Overlay state directory location ---
 echo "--- overlay state location ---"
 
-"$OCSB_BIN" -w "test-overlay-loc" --strategy overlayfs --overwrite -- -c true 2>/dev/null || true
+"$OCSB_BIN" -w "test-overlay-loc" --strategy overlayfs --overwrite -- -c true 2>/dev/null
 
 EXPECTED_STATE="$OCSB_STATE_BASE_DIR/test-overlay-loc"
 
@@ -165,6 +231,7 @@ assert "overlay upper file owned by host gid" [ "$(stat -c %g "$UID_TEST_FILE")"
 
 find "$EXPECTED_STATE" -type d -exec chmod u+w {} + 2>/dev/null || true
 rm -rf "$EXPECTED_STATE"
+test ! -e "$EXPECTED_STATE"
 rm -rf "$PROJECT_DIR/.ocsb/test-overlay-loc"
 echo ""
 
@@ -187,6 +254,7 @@ assert_fails "rejects relative custom state base" \
 
 find "$CUSTOM_STATE_BASE" -type d -exec chmod u+w {} + 2>/dev/null || true
 rm -rf "$CUSTOM_STATE_BASE" "$PROJECT_DIR/.ocsb/stable-state"
+test ! -e "$CUSTOM_STATE_BASE"
 echo ""
 
 # --- Legacy chroot layout migration ---
@@ -204,6 +272,7 @@ assert_not "legacy chroot marker removed" [ -e "$LEGACY_STATE/chroot/.chroot-sou
 
 find "$LEGACY_STATE" -type d -exec chmod u+w {} + 2>/dev/null || true
 rm -rf "$LEGACY_STATE" "$PROJECT_DIR/.ocsb/legacy-chroot"
+test ! -e "$LEGACY_STATE"
 echo ""
 
 # --- Store closure strictness ---
@@ -378,7 +447,7 @@ assert "overlay-mount: source data readable" [ "$OVL_OUTPUT" = "overlay-test-dat
 # Writes to overlay should not modify source
 "$OCSB_BIN" -w "test-ovl-mount" --strategy direct --continue \
   --overlay-mount "$OVL_SRC:/workspace/ovl-test" -- \
-  -c 'echo modified > /workspace/ovl-test/marker.txt' 2>/dev/null || true
+  -c 'echo modified > /workspace/ovl-test/marker.txt' 2>/dev/null
 OVL_ORIG="$(cat "$OVL_SRC/marker.txt")"
 OVL_HASH="$(echo -n "$OVL_SRC" | sha256sum | cut -c1-12)"
 OVL_STATE="$OCSB_STATE_BASE_DIR/test-ovl-mount/overlay/mounts/ovl-$OVL_HASH"
@@ -458,8 +527,9 @@ if [[ -d "$_CHROOT_STORE" ]]; then
   # Remove one store path to simulate corruption
   _FIRST_PATH="$(ls "$_CHROOT_STORE" | head -1)"
   if [[ -n "$_FIRST_PATH" ]]; then
-    chmod -R u+w "$_CHROOT_STORE/$_FIRST_PATH" 2>/dev/null || true
+    find "$_CHROOT_STORE/$_FIRST_PATH" -type d -exec chmod u+w {} + 2>/dev/null || true
     rm -rf "$_CHROOT_STORE/$_FIRST_PATH"
+    test ! -e "$_CHROOT_STORE/$_FIRST_PATH"
     # --continue should detect the missing path and re-populate
     assert "chroot corrupt: --continue recovers from missing store path" \
       "$OCSB_BIN" -w "$CHROOT_CORRUPT_WS" --continue --strategy direct -- echo "recovered"

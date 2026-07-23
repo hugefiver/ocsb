@@ -3,15 +3,13 @@ let
   lib = pkgs.lib;
   mkSandbox = import ../lib/mkSandbox.nix { inherit pkgs lib; };
 in mkSandbox ({ pkgs, ... }: {
-  app.name = "ocsb-dual-test";
+  app.name = "ocsb-dual-home-test";
   packages = with pkgs; [ coreutils curl jq iproute2 gnugrep ];
-  # Keep the default fixture explicit so it remains independent of the
-  # non-default /home/sandbox scenario in dual-layer-home-test.nix.
   workspace = {
     strategy = "direct";
     baseDir = ".ocsb";
     name = "_";
-    sandboxDir = "/workspace";
+    sandboxDir = "/home/sandbox";
   };
   experimental.dualLayer = true;
   env = {};

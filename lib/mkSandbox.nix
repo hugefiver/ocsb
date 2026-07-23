@@ -7,7 +7,7 @@
 #   mkSandbox { packages = [ pkgs.coreutils ]; workspace.strategy = "overlayfs"; }
 #   mkSandbox ({ pkgs, ... }: { packages = [ pkgs.coreutils ]; })
 
-{ pkgs, lib }:
+{ pkgs, lib, mountAnchorHelper ? null, mountAnchorTestHookMode ? "none" }:
 
 config:
 
@@ -28,6 +28,48 @@ let
   };
 
   cfg = evaluated.config;
+  runtimeProcess = import ./runtime-process.nix { inherit pkgs lib; };
+  mountAnchor =
+    if mountAnchorHelper != null
+    then mountAnchorHelper
+    else pkgs.callPackage ../pkgs/mount-anchor.nix { };
+  # Shell invariant (mutation): "${INHERITED_FD_ARGS[@]}" is forwarded unchanged.
+  # Shell invariant (final): "${INHERITED_FD_ARGS[@]}" is forwarded unchanged.
+  mountAnchorMutationTestHookArgs =
+    assert lib.assertMsg
+      (builtins.elem mountAnchorTestHookMode [ "none" "mutation" "final" "inherited" ])
+      "mountAnchorTestHookMode must be one of: none, mutation, final, inherited";
+    if mountAnchorTestHookMode == "mutation"
+    then [
+      "--test-before-mutation-ready-fd"
+      "3"
+      "--test-before-mutation-release-fd"
+      "4"
+    ]
+    else if mountAnchorTestHookMode == "inherited"
+    then [
+      "--test-before-inherited-mutation-open-ready-fd"
+      "20"
+      "--test-before-inherited-mutation-open-release-fd"
+      "21"
+    ]
+    else [ ];
+  mountAnchorFinalTestHookArgs =
+    if mountAnchorTestHookMode == "final"
+    then [
+      "--test-before-receipt-open-ready-fd"
+      "5"
+      "--test-before-receipt-open-release-fd"
+      "6"
+    ]
+    else if mountAnchorTestHookMode == "inherited"
+    then [
+      "--test-before-inherited-final-open-ready-fd"
+      "22"
+      "--test-before-inherited-final-open-release-fd"
+      "23"
+    ]
+    else [ ];
 
   # --- Package PATH ---
   # Always include bash; user packages are additive
@@ -41,7 +83,7 @@ let
   # closure of only the packages we need and mount just those paths.
   closureInfoDrv = pkgs.closureInfo {
     rootPaths =
-      [ sandboxBin pkgs.bubblewrap pkgs.cacert ]
+      [ sandboxBin pkgs.bubblewrap pkgs.cacert mountAnchor ]
       ++ lib.optional (cfg.app.package != null) cfg.app.package
       ++ lib.optional (preExecScript != null) preExecScript
       ++ lib.optional (preExecScript == null) envCaptureScript
@@ -87,20 +129,6 @@ let
     then null
     else pkgs.writeShellScript "${cfg.app.name}-supervisor" ''
       set -euo pipefail
-
-      : ''${HERMES_HOME:=$HOME/.hermes}
-      : ''${TERMINAL_CWD:=/home/sandbox}
-      export HERMES_HOME TERMINAL_CWD
-
-      # persistent venv — create if missing, inject PYTHONPATH / PATH
-      _VENV="$HOME/.hermes-venv"
-      if [[ ! -d "$_VENV" ]]; then
-        ${pkgs.python3}/bin/python3 -m venv "$_VENV"
-        "$_VENV/bin/pip" install --quiet --upgrade pip
-      fi
-      _VENV_SITE=$("$_VENV/bin/python" -c 'import site; print(site.getsitepackages()[0])')
-      export PYTHONPATH="$_VENV_SITE''${PYTHONPATH:+:$PYTHONPATH}"
-      export PATH="$_VENV/bin:$PATH"
 
       _DAEMON_PIDS=()
 
@@ -275,22 +303,42 @@ let
     for _store_path in /nix/store/*; do
       _INNER_ARGS+=(--ro-bind "$_store_path" "$_store_path")
     done
+
     _INNER_ARGS+=(
       --ro-bind /usr/bin /usr/bin
       --symlink /usr/bin /bin
       --symlink usr/lib /lib
       --symlink usr/lib64 /lib64
-      --bind /workspace /workspace
+      --bind ${lib.escapeShellArg cfg.workspace.sandboxDir} ${lib.escapeShellArg cfg.workspace.sandboxDir}
       --ro-bind-try /etc/passwd /etc/passwd
       --ro-bind-try /etc/group /etc/group
       --clearenv
+    )
+
+    # Keep the inner shell useful while preserving its --clearenv boundary.
+    # Read NUL-delimited entries so spaces, equals signs, and newlines in values
+    # survive without evaluation. Only shell-valid names become bwrap argv.
+    while IFS= read -r -d "" _inner_env_entry; do
+      [[ "$_inner_env_entry" == *=* ]] || continue
+      _inner_env_name="''${_inner_env_entry%%=*}"
+      _inner_env_value="''${_inner_env_entry#*=}"
+      [[ "$_inner_env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+      case "$_inner_env_name" in
+        HOME|PATH|TERM|SSL_CERT_FILE|SANDBOX|OCSB_DUAL_LAYER)
+          continue
+          ;;
+      esac
+      _INNER_ARGS+=(--setenv "$_inner_env_name" "$_inner_env_value")
+    done < <(${pkgs.coreutils}/bin/env -0)
+
+    _INNER_ARGS+=(
       --setenv HOME /home/sandbox
-  --setenv PATH ${sandboxPath}
-      --setenv TERM "''${TERM:-xterm-256color}"
+      --setenv PATH ${sandboxPath}
+      --setenv TERM xterm-256color
       --setenv SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
       --setenv SANDBOX 1
       --setenv OCSB_DUAL_LAYER inner
-      --chdir "$(pwd)"
+      --chdir ${lib.escapeShellArg cfg.workspace.sandboxDir}
     )
 
     # Route by invocation form — all go through inner bwrap
@@ -314,6 +362,8 @@ let
   launcher = pkgs.writeShellScript "${cfg.app.name}-launcher" ''
     set -euo pipefail
 
+    ${runtimeProcess.shellHelpers}
+
     proc_comm() {
       local _pid="$1"
       [[ "$_pid" =~ ^[0-9]+$ ]] || return 0
@@ -321,40 +371,6 @@ let
       local _comm
       IFS= read -r _comm < "/proc/$_pid/comm" || return 0
       printf '%s\n' "$_comm"
-    }
-
-    proc_ppid() {
-      local _pid="$1"
-      [[ "$_pid" =~ ^[0-9]+$ ]] || return 0
-      [[ -r "/proc/$_pid/status" ]] || return 0
-      local _line _ppid
-      while IFS= read -r _line; do
-        case "$_line" in
-          PPid:*)
-            _ppid="''${_line#PPid:}"
-            _ppid="''${_ppid//[[:space:]]/}"
-            printf '%s\n' "$_ppid"
-            return 0
-            ;;
-        esac
-      done < "/proc/$_pid/status"
-    }
-
-    proc_start_time() {
-      local _pid="$1"
-      [[ "$_pid" =~ ^[0-9]+$ ]] || return 0
-      [[ -r "/proc/$_pid/stat" ]] || return 0
-      local _stat _rest _field _idx
-      IFS= read -r _stat < "/proc/$_pid/stat" || return 0
-      _rest="''${_stat##*) }"
-      _idx=1
-      for _field in $_rest; do
-        if [[ $_idx -eq 20 ]]; then
-          printf '%s\n' "$_field"
-          return 0
-        fi
-        _idx=$((_idx + 1))
-      done
     }
 
     resolve_attach_init_pid() {
@@ -383,24 +399,11 @@ let
 
       if [[ -n "$_expected_start" ]]; then
         local _actual_start
-        _actual_start="$(proc_start_time "$_candidate_pid")"
+        _actual_start="$(ocsb_proc_start_time "$_candidate_pid")"
         if [[ -z "$_actual_start" || "$_actual_start" != "$_expected_start" ]]; then
           _ATTACH_ERROR="ocsb: attach PID $_candidate_pid start time changed (stale pidfile?)"
           _ATTACH_STALE=1
           return 1
-        fi
-      fi
-
-      # Accept --attach=<pid> for either the outer bwrap process or the
-      # sandbox-init bwrap child. The latter is common when users inspect
-      # the process tree manually and copy the namespace-holding PID.
-      local _parent_pid _parent_comm
-      _parent_pid="$(proc_ppid "$_candidate_pid")"
-      if [[ -n "$_parent_pid" ]]; then
-        _parent_comm="$(proc_comm "$_parent_pid")"
-        if [[ "$_parent_comm" == "bwrap" ]]; then
-          _RESOLVED_INIT_PID="$_candidate_pid"
-          return 0
         fi
       fi
 
@@ -428,33 +431,21 @@ let
     maybe_attach() {
     # =========================================================
     # --attach: enter namespaces of the currently-running sandbox
-    # of this same app. Detected anywhere in args; bypasses every
-    # other launcher behavior (no preExecHook, no service start,
-    # no fresh bwrap). Use this when you need a shell inside the
+    # of this same app. Bypasses every other launcher behavior (no
+    # preExecHook, no service start, no fresh bwrap). Use this when
+    # you need a shell inside the
     # SAME instance (e.g. to query a postgres that's already up).
     # =========================================================
-    _ATTACH_TARGET=""
-    for _arg in "$@"; do
-      case "$_arg" in
-        --attach) _ATTACH_TARGET="auto"; break ;;
-        --attach=*) _ATTACH_TARGET="''${_arg#--attach=}"; break ;;
-      esac
-    done
-
-    if [[ -n "$_ATTACH_TARGET" ]]; then
-      _PIDFILE="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/${cfg.app.name}.pid"
-      _BWRAP_PID=""
-      _BWRAP_START=""
-      if [[ "$_ATTACH_TARGET" == "auto" ]]; then
-        if [[ ! -e "$_PIDFILE" ]]; then
-          echo "ocsb: no running ${cfg.app.name} instance (pidfile $_PIDFILE missing)" >&2
-          echo "ocsb: launch the sandbox first, or pass --attach=<bwrap-pid>" >&2
-          exit 1
+    if [[ -n "$ATTACH_TARGET" ]]; then
+      if ! ocsb_validate_process_record "$OCSB_PROCESS_RECORD" "$OCSB_INSTANCE"; then
+        if [[ -n "''${OCSB_RECORD_LINE:-}" && "''${OCSB_RECORD_INSTANCE:-}" == "$OCSB_INSTANCE" ]]; then
+          ocsb_remove_matching_process_record "$OCSB_PROCESS_RECORD" "$OCSB_RECORD_LINE" 2>/dev/null || true
         fi
-        read -r _BWRAP_PID _BWRAP_START < "$_PIDFILE" || true
-      else
-        _BWRAP_PID="$_ATTACH_TARGET"
+        echo "ocsb: no valid running ${cfg.app.name} instance record at $OCSB_PROCESS_RECORD" >&2
+        exit 1
       fi
+      _BWRAP_PID="$OCSB_RECORD_PID"
+      _BWRAP_START="$OCSB_RECORD_START"
       # bwrap forks the sandbox-init child (also named "bwrap"), which
       # holds the user/mount/pid/etc namespaces we want to enter.
       # In filtered-network mode, slirp4netns is ALSO a child of bwrap
@@ -473,7 +464,13 @@ let
       done
       if [[ -z "$_INIT_PID" ]]; then
         echo "''${_ATTACH_ERROR:-ocsb: unable to resolve sandbox-init bwrap process}" >&2
-        [[ "$_ATTACH_TARGET" == "auto" && "''${_ATTACH_STALE:-0}" -eq 1 && -e "$_PIDFILE" ]] && ${pkgs.coreutils}/bin/rm -f "$_PIDFILE"
+        if [[ "''${_ATTACH_STALE:-0}" -eq 1 ]]; then
+          ocsb_remove_matching_process_record "$OCSB_PROCESS_RECORD" "$OCSB_RECORD_LINE" 2>/dev/null || true
+        fi
+        exit 1
+      fi
+      if [[ "$ATTACH_TARGET" != "auto" && "$ATTACH_TARGET" != "$_BWRAP_PID" && "$ATTACH_TARGET" != "$_INIT_PID" ]]; then
+        echo "ocsb: attach PID $ATTACH_TARGET does not match the recorded bwrap or its unique sandbox-init child" >&2
         exit 1
       fi
       # Inner shell: prefer the payload environment captured inside the sandbox
@@ -507,21 +504,13 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     fi
     }
 
-    record_attach_pidfile() {
-      local _pidfile_dir="''${XDG_RUNTIME_DIR:-/tmp}/ocsb"
-      ${pkgs.coreutils}/bin/mkdir -p "$_pidfile_dir"
-      local _pid_start
-      _pid_start="$(proc_start_time "$$")"
-      if [[ -n "$_pid_start" ]]; then
-        printf '%s %s\n' "$$" "$_pid_start" > "$_pidfile_dir/${cfg.app.name}.pid"
-      else
-        echo $$ > "$_pidfile_dir/${cfg.app.name}.pid"
-      fi
+    record_attach_process() {
+      ocsb_write_process_record "$OCSB_PROCESS_RECORD" "$$" "$OCSB_INSTANCE"
     }
 
     BACKEND_TYPE=${lib.escapeShellArg defaultBackend}
-
-    maybe_attach "$@"
+    HOST_UID="$(${pkgs.coreutils}/bin/id -u)"
+    HOST_GID="$(${pkgs.coreutils}/bin/id -g)"
 
     # =========================================================
     # Helper: resolve ~ in paths at runtime
@@ -549,6 +538,372 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       echo "$p"
     }
 
+    # Built-in compatibility mounts are selected by ocsb rather than by the
+    # caller.  NixOS commonly exposes them as root-owned symlinks (notably
+    # /etc/resolv.conf and /etc/ssl).  Resolve those trusted aliases before
+    # manifest capture; the helper still opens the resulting canonical path
+    # with openat2 RESOLVE_NO_SYMLINKS and verifies its captured identity.
+    resolve_builtin_host_path() {
+      local _path="$1"
+      local _resolved
+      if [[ -e "$_path" ]]; then
+        _resolved="$(${pkgs.coreutils}/bin/readlink -e -- "$_path")" || {
+          echo "ocsb: unsafe host path: cannot resolve built-in source: $_path" >&2
+          exit 1
+        }
+        [[ "$_resolved" == /* && ! -L "$_resolved" ]] || {
+          echo "ocsb: unsafe host path: invalid built-in source target: $_path" >&2
+          exit 1
+        }
+        printf '%s\n' "$_resolved"
+      elif [[ -L "$_path" ]]; then
+        echo "ocsb: unsafe host path: dangling built-in source: $_path" >&2
+        exit 1
+      else
+        printf '%s\n' "$_path"
+      fi
+    }
+
+    parse_inherited_fd_root_spec() {
+      local _spec="$1" _canonical _fd_path _stat _dev _ino _kind _index
+      local -a _fields=()
+
+      if [[ "$_spec" == *$'\n'* || "$_spec" == *$'\r'* ]]; then
+        echo "ocsb: invalid --ocsb-internal-fd-root: expected one TAB-separated line" >&2
+        exit 1
+      fi
+      IFS=$'\t' read -r -a _fields <<< "$_spec"
+      if [[ ''${#_fields[@]} -ne 7 || "''${_fields[0]}" != v1 ]]; then
+        echo "ocsb: invalid --ocsb-internal-fd-root: expected seven TAB-separated fields" >&2
+        exit 1
+      fi
+      case "''${_fields[1]}" in
+        project|state-base|mount) ;;
+        *) echo "ocsb: invalid --ocsb-internal-fd-root role: ''${_fields[1]}" >&2; exit 1 ;;
+      esac
+      if [[ "''${_fields[2]}" != /* || "''${_fields[2]}" == *$'\t'* ||
+            "''${_fields[2]}" == *$'\n'* || "''${_fields[2]}" == *$'\r'* ]]; then
+        echo "ocsb: invalid --ocsb-internal-fd-root display path" >&2
+        exit 1
+      fi
+      _canonical="$(${pkgs.coreutils}/bin/realpath -e -- "''${_fields[2]}")" || {
+        echo "ocsb: invalid --ocsb-internal-fd-root display path: ''${_fields[2]}" >&2
+        exit 1
+      }
+      if [[ "$_canonical" != "''${_fields[2]}" ]]; then
+        echo "ocsb: invalid --ocsb-internal-fd-root non-canonical display path: ''${_fields[2]}" >&2
+        exit 1
+      fi
+      if [[ ! "''${_fields[3]}" =~ ^[0-9]+$ ||
+            ! "''${_fields[3]}" =~ ^0*([3-9]|[1-9][0-9]+)$ ||
+            ! "''${_fields[4]}" =~ ^[0-9]+$ || ! "''${_fields[5]}" =~ ^[0-9]+$ ]]; then
+        echo "ocsb: invalid --ocsb-internal-fd-root descriptor identity" >&2
+        exit 1
+      fi
+      case "''${_fields[6]}" in
+        directory|regular) ;;
+        *) echo "ocsb: invalid --ocsb-internal-fd-root type: ''${_fields[6]}" >&2; exit 1 ;;
+      esac
+      if [[ ( "''${_fields[1]}" == project || "''${_fields[1]}" == state-base ) &&
+            "''${_fields[6]}" != directory ]]; then
+        echo "ocsb: invalid --ocsb-internal-fd-root: project and state-base must be directories" >&2
+        exit 1
+      fi
+      for ((_index = 0; _index < ''${#INHERITED_FD_DISPLAYS[@]}; _index++)); do
+        if [[ "''${INHERITED_FD_DISPLAYS[$_index]}" == "''${_fields[2]}" ]]; then
+          if [[ "''${INHERITED_FD_TYPES[$_index]}" != "''${_fields[6]}" ]]; then
+            echo "ocsb: conflicting inherited descriptor types for display path: ''${_fields[2]}" >&2
+          else
+            echo "ocsb: duplicate inherited descriptor display path: ''${_fields[2]}" >&2
+          fi
+          exit 1
+        fi
+      done
+      case "''${_fields[1]}" in
+        project)
+          [[ -z "$INHERITED_PROJECT_FD" ]] || { echo "ocsb: duplicate inherited project descriptor" >&2; exit 1; }
+          ;;
+        state-base)
+          [[ -z "$INHERITED_STATE_BASE_FD" ]] || { echo "ocsb: duplicate inherited state-base descriptor" >&2; exit 1; }
+          ;;
+      esac
+
+      _fd_path="/proc/self/fd/''${_fields[3]}"
+      [[ -e "$_fd_path" ]] || {
+        echo "ocsb: invalid --ocsb-internal-fd-root descriptor: ''${_fields[2]}" >&2
+        exit 1
+      }
+      _stat="$(LC_ALL=C ${pkgs.coreutils}/bin/stat -L -c $'%d\t%i\t%F' -- "$_fd_path" 2>/dev/null)" || {
+        echo "ocsb: invalid --ocsb-internal-fd-root descriptor: ''${_fields[2]}" >&2
+        exit 1
+      }
+      IFS=$'\t' read -r _dev _ino _kind <<< "$_stat"
+      if [[ "$_dev" != "''${_fields[4]}" || "$_ino" != "''${_fields[5]}" ||
+            ( "''${_fields[6]}" == directory && "$_kind" != directory ) ||
+            ( "''${_fields[6]}" == regular && "$_kind" != "regular file" && "$_kind" != "regular empty file" ) ]]; then
+        echo "ocsb: invalid --ocsb-internal-fd-root descriptor identity: ''${_fields[2]}" >&2
+        exit 1
+      fi
+
+      INHERITED_FD_ARGS+=(--inherited-fd-spec "$_spec")
+      INHERITED_FD_ROLES+=("''${_fields[1]}")
+      INHERITED_FD_DISPLAYS+=("''${_fields[2]}")
+      INHERITED_FD_NUMBERS+=("''${_fields[3]}")
+      INHERITED_FD_DEVS+=("''${_fields[4]}")
+      INHERITED_FD_INOS+=("''${_fields[5]}")
+      INHERITED_FD_TYPES+=("''${_fields[6]}")
+      case "''${_fields[1]}" in
+        project)
+          INHERITED_PROJECT_FD="''${_fields[3]}"
+          INHERITED_PROJECT_DISPLAY="''${_fields[2]}"
+          INHERITED_PROJECT_DEV="''${_fields[4]}"
+          INHERITED_PROJECT_INO="''${_fields[5]}"
+          ;;
+        state-base)
+          INHERITED_STATE_BASE_FD="''${_fields[3]}"
+          INHERITED_STATE_BASE_DISPLAY="''${_fields[2]}"
+          ;;
+      esac
+    }
+
+    select_inherited_source_access() {
+      local _path="$1" _index _root _relative _candidate=-1 _candidate_length=0
+
+      INHERITED_SOURCE_MATCHED=0
+      INHERITED_SOURCE_ACCESS_PATH=""
+      INHERITED_SOURCE_DEV=""
+      INHERITED_SOURCE_INO=""
+      INHERITED_SOURCE_TYPE=""
+      INHERITED_SOURCE_ERROR=0
+      for ((_index = 0; _index < ''${#INHERITED_FD_DISPLAYS[@]}; _index++)); do
+        _root="''${INHERITED_FD_DISPLAYS[$_index]}"
+        if [[ "$_root" == / ]]; then
+          [[ "$_path" == /* ]] || continue
+          _relative="''${_path#/}"
+        elif [[ "$_path" == "$_root" ]]; then
+          _relative=""
+        elif [[ "$_path" == "$_root/"* ]]; then
+          _relative="''${_path#"$_root/"}"
+        else
+          continue
+        fi
+        if [[ "''${INHERITED_FD_TYPES[$_index]}" == regular ]]; then
+          if [[ -n "$_relative" ]]; then
+            echo "ocsb: inherited regular root cannot contain descendants: $_root" >&2
+            INHERITED_SOURCE_ERROR=1
+            return
+          fi
+          _candidate=$_index
+          _candidate_length=''${#_root}
+        elif [[ $_candidate -lt 0 || "''${INHERITED_FD_TYPES[$_candidate]}" != regular && ''${#_root} -gt $_candidate_length ]]; then
+          _candidate=$_index
+          _candidate_length=''${#_root}
+        fi
+      done
+      [[ $_candidate -ge 0 ]] || return 0
+
+      _root="''${INHERITED_FD_DISPLAYS[$_candidate]}"
+      if [[ "$_root" == / ]]; then
+        _relative="''${_path#/}"
+      elif [[ "$_path" == "$_root" ]]; then
+        _relative=""
+      else
+        _relative="''${_path#"$_root/"}"
+      fi
+      INHERITED_SOURCE_MATCHED=1
+      INHERITED_SOURCE_ACCESS_PATH="/proc/self/fd/''${INHERITED_FD_NUMBERS[$_candidate]}"
+      if [[ -z "$_relative" ]]; then
+        INHERITED_SOURCE_DEV="''${INHERITED_FD_DEVS[$_candidate]}"
+        INHERITED_SOURCE_INO="''${INHERITED_FD_INOS[$_candidate]}"
+        INHERITED_SOURCE_TYPE="''${INHERITED_FD_TYPES[$_candidate]}"
+        return
+      fi
+      INHERITED_SOURCE_ACCESS_PATH+="/$_relative"
+      local _stat _kind
+      _stat="$(LC_ALL=C ${pkgs.coreutils}/bin/stat -L -c $'%d\t%i\t%F' -- "$INHERITED_SOURCE_ACCESS_PATH" 2>/dev/null)" || {
+        echo "ocsb: unsafe host path: cannot derive inherited source: $_path" >&2
+        INHERITED_SOURCE_ERROR=1
+        return
+      }
+      IFS=$'\t' read -r INHERITED_SOURCE_DEV INHERITED_SOURCE_INO _kind <<< "$_stat"
+      case "$_kind" in
+        directory) INHERITED_SOURCE_TYPE=directory ;;
+        "regular file"|"regular empty file") INHERITED_SOURCE_TYPE=regular ;;
+        *)
+          echo "ocsb: unsafe host path: unsupported inherited source type: $_path ($_kind)" >&2
+          INHERITED_SOURCE_ERROR=1
+          ;;
+      esac
+    }
+
+    reset_mount_anchor_sources() {
+      MOUNT_ANCHOR_TOKENS=()
+      MOUNT_ANCHOR_PATHS=()
+      MOUNT_ANCHOR_CONTAINMENT_ROOTS=()
+      MOUNT_ANCHOR_DEVS=()
+      MOUNT_ANCHOR_INOS=()
+      MOUNT_ANCHOR_TYPES=()
+      MOUNT_ANCHOR_REQUIREDNESS=()
+    }
+
+    register_mount_anchor_source() {
+      local _path="$1"
+      local _requiredness="$2"
+      local _index="''${#MOUNT_ANCHOR_TOKENS[@]}"
+      local _token="@OCSB_SOURCE_''${_index}@"
+      local _dev=0 _ino=0 _type=directory _kind _stat
+
+      if [[ "$_path" != /* || "$_path" == *$'\t'* || "$_path" == *$'\n'* || "$_path" == *$'\r'* ]]; then
+        echo "ocsb: unsafe host path: source must be an absolute path without TAB or newline: $_path" >&2
+        exit 1
+      fi
+      select_inherited_source_access "$_path"
+      if [[ "$INHERITED_SOURCE_ERROR" -eq 1 ]]; then
+        exit 1
+      elif [[ "$INHERITED_SOURCE_MATCHED" -eq 1 ]]; then
+        _dev="$INHERITED_SOURCE_DEV"
+        _ino="$INHERITED_SOURCE_INO"
+        _type="$INHERITED_SOURCE_TYPE"
+      elif [[ -L "$_path" ]]; then
+        echo "ocsb: unsafe host path: symlink source refused: $_path" >&2
+        exit 1
+      fi
+      if [[ "$INHERITED_SOURCE_MATCHED" -eq 1 ]]; then
+        :
+      elif [[ -n "''${WORKSPACE_RECEIPT_SOURCE_PATH:-}" &&
+            "$_path" == "$WORKSPACE_RECEIPT_SOURCE_PATH" ]]; then
+        _dev="$WORKSPACE_RECEIPT_SOURCE_DEV"
+        _ino="$WORKSPACE_RECEIPT_SOURCE_INO"
+        _type=directory
+      elif _stat="$(LC_ALL=C ${pkgs.coreutils}/bin/stat -L -c $'%d\t%i\t%F' -- "$_path" 2>/dev/null)"; then
+        IFS=$'\t' read -r _dev _ino _kind <<< "$_stat"
+        case "$_kind" in
+          directory) _type=directory ;;
+          "regular file"|"regular empty file") _type=regular ;;
+          *)
+            echo "ocsb: unsafe host path: unsupported source type: $_path ($_kind)" >&2
+            exit 1
+            ;;
+        esac
+      fi
+
+      MOUNT_ANCHOR_TOKENS+=("$_token")
+      MOUNT_ANCHOR_PATHS+=("$_path")
+      MOUNT_ANCHOR_CONTAINMENT_ROOTS+=(/)
+      MOUNT_ANCHOR_DEVS+=("$_dev")
+      MOUNT_ANCHOR_INOS+=("$_ino")
+      MOUNT_ANCHOR_TYPES+=("$_type")
+      MOUNT_ANCHOR_REQUIREDNESS+=("$_requiredness")
+      MOUNT_ANCHOR_REGISTERED_TOKEN="$_token"
+    }
+
+    tokenize_bwrap_mount_sources() {
+      reset_mount_anchor_sources
+      local _i=0 _flag _requiredness
+      while [[ $_i -lt ''${#BWRAP_ARGS[@]} ]]; do
+        _flag="''${BWRAP_ARGS[$_i]}"
+        case "$_flag" in
+          --bind|--ro-bind|--bind-try|--ro-bind-try)
+            _requiredness=required
+            [[ "$_flag" == --bind-try || "$_flag" == --ro-bind-try ]] && _requiredness=optional
+            register_mount_anchor_source "''${BWRAP_ARGS[$((_i + 1))]}" "$_requiredness"
+            BWRAP_ARGS[$((_i + 1))]="$MOUNT_ANCHOR_REGISTERED_TOKEN"
+            _i=$((_i + 3))
+            ;;
+          --overlay-src)
+            register_mount_anchor_source "''${BWRAP_ARGS[$((_i + 1))]}" required
+            BWRAP_ARGS[$((_i + 1))]="$MOUNT_ANCHOR_REGISTERED_TOKEN"
+            _i=$((_i + 2))
+            ;;
+          --overlay)
+            register_mount_anchor_source "''${BWRAP_ARGS[$((_i + 1))]}" required
+            BWRAP_ARGS[$((_i + 1))]="$MOUNT_ANCHOR_REGISTERED_TOKEN"
+            register_mount_anchor_source "''${BWRAP_ARGS[$((_i + 2))]}" required
+            BWRAP_ARGS[$((_i + 2))]="$MOUNT_ANCHOR_REGISTERED_TOKEN"
+            _i=$((_i + 4))
+            ;;
+          --setenv|--symlink) _i=$((_i + 3)) ;;
+          --uid|--gid|--dev|--proc|--tmpfs|--dir|--chdir) _i=$((_i + 2)) ;;
+          *) _i=$((_i + 1)) ;;
+        esac
+      done
+    }
+
+    build_mount_anchor_helper_args() {
+      local _backend="$1"
+      local _namespace="$2"
+      local _argv_name="$3"
+      local -n _backend_argv="$_argv_name"
+      local _source_index _argv_index _occurrences _replacement_index
+      local _drop_start _drop_count _spec _value _token
+
+      MOUNT_ANCHOR_ARGS=(
+        --backend "$_backend"
+        --namespace "$_namespace"
+        --host-uid "$HOST_UID"
+        --host-gid "$HOST_GID"
+        --anchor-root "$OCSB_RUNTIME_DIR"
+        "''${INHERITED_FD_ARGS[@]}"
+      )
+      ${lib.optionalString (mountAnchorFinalTestHookArgs != [ ]) ''
+      MOUNT_ANCHOR_ARGS+=(${lib.escapeShellArgs mountAnchorFinalTestHookArgs})
+      ''}
+      MOUNT_ANCHOR_ARGS+=(
+        --workspace-receipt "$WORKSPACE_RECEIPT"
+        --workspace-nonce "$WORKSPACE_NONCE"
+        --workspace-project "$PROJECT_DIR"
+        --workspace-base "$OCSB_BASE_DIR"
+        --workspace-name "$WORKSPACE_NAME"
+      )
+
+      for ((_source_index = 0; _source_index < ''${#MOUNT_ANCHOR_TOKENS[@]}; _source_index++)); do
+        _token="''${MOUNT_ANCHOR_TOKENS[$_source_index]}"
+        _occurrences=0
+        _replacement_index=-1
+        for ((_argv_index = 0; _argv_index < ''${#_backend_argv[@]}; _argv_index++)); do
+          _value="''${_backend_argv[$_argv_index]}"
+          if [[ "$_value" == *"$_token"* ]]; then
+            _occurrences=$((_occurrences + 1))
+            _replacement_index=$_argv_index
+          fi
+        done
+        if [[ $_occurrences -ne 1 ]]; then
+          echo "ocsb: internal error: anchor token $_token occurs $_occurrences times in backend argv" >&2
+          exit 1
+        fi
+
+        _drop_start=0
+        _drop_count=0
+        if [[ "''${MOUNT_ANCHOR_REQUIREDNESS[$_source_index]}" == optional ]]; then
+          case "$_backend" in
+            bubblewrap)
+              _drop_start=$((_replacement_index - 1))
+              _drop_count=3
+              ;;
+            podman)
+              _drop_start=$((_replacement_index - 1))
+              _drop_count=2
+              ;;
+            systemd-nspawn)
+              _drop_start=$_replacement_index
+              _drop_count=1
+              ;;
+          esac
+        fi
+        printf -v _spec '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+          "$_token" \
+          "''${MOUNT_ANCHOR_PATHS[$_source_index]}" \
+          "''${MOUNT_ANCHOR_CONTAINMENT_ROOTS[$_source_index]}" \
+          "''${MOUNT_ANCHOR_DEVS[$_source_index]}" \
+          "''${MOUNT_ANCHOR_INOS[$_source_index]}" \
+          "''${MOUNT_ANCHOR_TYPES[$_source_index]}" \
+          "''${MOUNT_ANCHOR_REQUIREDNESS[$_source_index]}" \
+          "$_drop_start" \
+          "$_drop_count"
+        MOUNT_ANCHOR_ARGS+=(--source-spec "$_spec" --replace "$_replacement_index:$_token")
+      done
+    }
+
     chmod_tree_dirs_writable() {
       local p="$1"
       [[ -d "$p" ]] || return 0
@@ -561,9 +916,6 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       local _dst="$3"
       local _mode="rw"
       [[ "$_flag" == "--ro-bind" || "$_flag" == "--ro-bind-try" ]] && _mode="ro"
-      if [[ "$_flag" == "--bind-try" || "$_flag" == "--ro-bind-try" ]]; then
-        [[ -e "$_src" ]] || return 0
-      fi
       CONTAINER_MOUNT_SRCS+=("$_src")
       CONTAINER_MOUNT_DSTS+=("$_dst")
       CONTAINER_MOUNT_MODES+=("$_mode")
@@ -575,22 +927,81 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     }
 
     prepare_container_rootfs() {
+      local _state_real _state_owner _state_mode _rootfs_owner
+
       CONTAINER_ROOTFS="$OVERLAY_STATE_DIR/rootfs"
+      CONTAINER_ROOTFS_ACCESS="$OVERLAY_STATE_ACCESS_DIR/rootfs"
+
+      # This rebuild intentionally happens while the per-workspace lock (FD 9)
+      # is held.  The state directory and its canonical child must be safe
+      # before making a recursive, non-following deletion.
+      if ! { : >&9; }; then
+        echo "ocsb: container rootfs preparation requires the workspace lock on FD 9" >&2
+        exit 1
+      fi
+      _state_real="$(${pkgs.coreutils}/bin/realpath -e -- "$OVERLAY_STATE_ACCESS_DIR")" || {
+        echo "ocsb: unsafe container rootfs state directory: $OVERLAY_STATE_DIR" >&2
+        exit 1
+      }
+      if [[ "$_state_real" != "$OVERLAY_STATE_ACCESS_DIR" || -L "$OVERLAY_STATE_ACCESS_DIR" ||
+            ! -d "$OVERLAY_STATE_ACCESS_DIR" || "$CONTAINER_ROOTFS_ACCESS" != "$_state_real/rootfs" ]]; then
+        echo "ocsb: unsafe container rootfs state path: $OVERLAY_STATE_DIR" >&2
+        exit 1
+      fi
+      read -r _state_owner _state_mode < <(${pkgs.coreutils}/bin/stat -c '%u %a' -- "$OVERLAY_STATE_ACCESS_DIR") || {
+        echo "ocsb: cannot stat container rootfs state directory: $OVERLAY_STATE_DIR" >&2
+        exit 1
+      }
+      if [[ "$_state_owner" != "$HOST_UID" || "$_state_mode" != 700 ]]; then
+        echo "ocsb: unsafe container rootfs state directory: $OVERLAY_STATE_DIR must be a current-UID mode 0700 directory" >&2
+        exit 1
+      fi
+
+      if [[ -e "$CONTAINER_ROOTFS_ACCESS" || -L "$CONTAINER_ROOTFS_ACCESS" ]]; then
+        if [[ -L "$CONTAINER_ROOTFS_ACCESS" || ! -d "$CONTAINER_ROOTFS_ACCESS" ]]; then
+          echo "ocsb: unsafe container rootfs path: $CONTAINER_ROOTFS is not a non-symlink directory" >&2
+          exit 1
+        fi
+        _rootfs_owner="$(${pkgs.coreutils}/bin/stat -c %u -- "$CONTAINER_ROOTFS_ACCESS")" || {
+          echo "ocsb: cannot stat container rootfs path: $CONTAINER_ROOTFS" >&2
+          exit 1
+        }
+        if [[ "$_rootfs_owner" != "$HOST_UID" ]]; then
+          echo "ocsb: unsafe container rootfs path: $CONTAINER_ROOTFS is not owned by the current UID" >&2
+          exit 1
+        fi
+        if ! ${pkgs.findutils}/bin/find "$CONTAINER_ROOTFS_ACCESS" -xdev -type d ! -perm -u+w -exec ${pkgs.coreutils}/bin/chmod u+w -- {} +; then
+          echo "ocsb: cannot make container rootfs directories writable: $CONTAINER_ROOTFS" >&2
+          exit 1
+        fi
+        if ! ${pkgs.coreutils}/bin/rm -rf --one-file-system -- "$CONTAINER_ROOTFS_ACCESS"; then
+          echo "ocsb: cannot remove container rootfs: $CONTAINER_ROOTFS" >&2
+          exit 1
+        fi
+        if [[ -e "$CONTAINER_ROOTFS_ACCESS" || -L "$CONTAINER_ROOTFS_ACCESS" ]]; then
+          echo "ocsb: container rootfs remains after removal: $CONTAINER_ROOTFS" >&2
+          exit 1
+        fi
+      fi
+
+      (umask 077; ${pkgs.coreutils}/bin/install -d -m 0700 -- "$CONTAINER_ROOTFS_ACCESS")
       ${pkgs.coreutils}/bin/mkdir -p \
-        "$CONTAINER_ROOTFS/usr/bin" \
-        "$CONTAINER_ROOTFS/nix/store" \
-        "$CONTAINER_ROOTFS/nix/var/nix" \
-        "$CONTAINER_ROOTFS/workspace" \
-        "$CONTAINER_ROOTFS/home/sandbox/.config" \
-        "$CONTAINER_ROOTFS/home/sandbox/.local" \
-        "$CONTAINER_ROOTFS/tmp" \
-        "$CONTAINER_ROOTFS/run" \
-        "$CONTAINER_ROOTFS/var/lib/postgresql" \
-        "$CONTAINER_ROOTFS/etc"
-      [[ -e "$CONTAINER_ROOTFS/bin" ]] || ${pkgs.coreutils}/bin/ln -s usr/bin "$CONTAINER_ROOTFS/bin"
-      [[ -e "$CONTAINER_ROOTFS/lib" ]] || ${pkgs.coreutils}/bin/ln -s usr/lib "$CONTAINER_ROOTFS/lib"
-      [[ -e "$CONTAINER_ROOTFS/lib64" ]] || ${pkgs.coreutils}/bin/ln -s usr/lib64 "$CONTAINER_ROOTFS/lib64"
-      ${pkgs.coreutils}/bin/mkdir -p "$CONTAINER_ROOTFS/usr/lib" "$CONTAINER_ROOTFS/usr/lib64"
+        "$CONTAINER_ROOTFS_ACCESS/usr/bin" \
+        "$CONTAINER_ROOTFS_ACCESS/usr/lib" \
+        "$CONTAINER_ROOTFS_ACCESS/usr/lib64" \
+        "$CONTAINER_ROOTFS_ACCESS/nix/store" \
+        "$CONTAINER_ROOTFS_ACCESS/nix/var/nix" \
+        "$CONTAINER_ROOTFS_ACCESS/workspace" \
+        "$CONTAINER_ROOTFS_ACCESS/home/sandbox/.config" \
+        "$CONTAINER_ROOTFS_ACCESS/home/sandbox/.local" \
+        "$CONTAINER_ROOTFS_ACCESS/tmp" \
+        "$CONTAINER_ROOTFS_ACCESS/run" \
+        "$CONTAINER_ROOTFS_ACCESS/var/lib/postgresql" \
+        "$CONTAINER_ROOTFS_ACCESS/etc"
+      ${pkgs.coreutils}/bin/chmod 1777 -- "$CONTAINER_ROOTFS_ACCESS/tmp"
+      ${pkgs.coreutils}/bin/ln -s usr/bin "$CONTAINER_ROOTFS_ACCESS/bin"
+      ${pkgs.coreutils}/bin/ln -s usr/lib "$CONTAINER_ROOTFS_ACCESS/lib"
+      ${pkgs.coreutils}/bin/ln -s usr/lib64 "$CONTAINER_ROOTFS_ACCESS/lib64"
     }
 
     build_container_plan_from_bwrap_args() {
@@ -684,9 +1095,9 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       GIT_METADATA_FLAGS=()
 
       case "$WORKSPACE_STRATEGY" in
-        overlayfs|direct) _GIT_CHECK_SRC="$PROJECT_DIR" ;;
-        btrfs) _GIT_CHECK_SRC="''${BTRFS_SNAP:-}" ;;
-        git-worktree) _GIT_CHECK_SRC="''${GWT_DIR:-}" ;;
+        overlayfs|direct) _GIT_CHECK_SRC="$PROJECT_ACCESS_DIR" ;;
+        btrfs) _GIT_CHECK_SRC="''${BTRFS_SNAP_ACCESS:-}" ;;
+        git-worktree) _GIT_CHECK_SRC="''${GWT_DIR_ACCESS:-}" ;;
         *) _GIT_CHECK_SRC="" ;;
       esac
 
@@ -695,8 +1106,19 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           ${pkgs.git}/bin/git -C "$_GIT_CHECK_SRC" rev-parse --absolute-git-dir 2>/dev/null)" || _GITDIR_PATH=""
 
         if [[ -n "$_GITDIR_PATH" ]] && [[ -d "$_GITDIR_PATH" ]]; then
+          if [[ -n "$INHERITED_PROJECT_FD" ]]; then
+            case "$_GITDIR_PATH" in
+              "$PROJECT_ACCESS_DIR") _GITDIR_REAL="$PROJECT_DIR" ;;
+              "$PROJECT_ACCESS_DIR"/*) _GITDIR_REAL="$PROJECT_DIR''${_GITDIR_PATH#"$PROJECT_ACCESS_DIR"}" ;;
+              *)
+                echo "ocsb: warning: git metadata path escapes project root, skipping: $_GITDIR_PATH" >&2
+                return
+                ;;
+            esac
+          else
+            _GITDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH")"
+          fi
           # Security: constrain git metadata to project root boundary
-          _GITDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH")"
           if [[ "$_GITDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_GITDIR_REAL" != "$PROJECT_DIR" ]]; then
             echo "ocsb: warning: git metadata path escapes project root, skipping: $_GITDIR_PATH" >&2
           else
@@ -713,10 +1135,21 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
               _COMMONDIR_PATH="$(${pkgs.coreutils}/bin/realpath -m "$_GITDIR_PATH/$_COMMONDIR_PATH")"
             fi
             if [[ -n "$_COMMONDIR_PATH" ]] && [[ -d "$_COMMONDIR_PATH" ]] && [[ "$_COMMONDIR_PATH" != "$_GITDIR_PATH" ]]; then
-              _COMMONDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_COMMONDIR_PATH")"
-              if [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR" ]]; then
-                echo "ocsb: warning: git common-dir escapes project root, skipping: $_COMMONDIR_PATH" >&2
+              if [[ -n "$INHERITED_PROJECT_FD" ]]; then
+                case "$_COMMONDIR_PATH" in
+                  "$PROJECT_ACCESS_DIR") _COMMONDIR_REAL="$PROJECT_DIR" ;;
+                  "$PROJECT_ACCESS_DIR"/*) _COMMONDIR_REAL="$PROJECT_DIR''${_COMMONDIR_PATH#"$PROJECT_ACCESS_DIR"}" ;;
+                  *)
+                    echo "ocsb: warning: git common-dir escapes project root, skipping: $_COMMONDIR_PATH" >&2
+                    _COMMONDIR_REAL=""
+                    ;;
+                esac
               else
+                _COMMONDIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$_COMMONDIR_PATH")"
+              fi
+              if [[ -n "$_COMMONDIR_REAL" ]] && [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$_COMMONDIR_REAL" != "$PROJECT_DIR" ]]; then
+                echo "ocsb: warning: git common-dir escapes project root, skipping: $_COMMONDIR_PATH" >&2
+              elif [[ -n "$_COMMONDIR_REAL" ]]; then
                 # Use canonical path as bind source to prevent TOCTOU symlink-swap attacks
                 GIT_METADATA_FLAGS+=("$_GIT_BIND" "$_COMMONDIR_REAL" "$_COMMONDIR_REAL")
               fi
@@ -752,7 +1185,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       # preseed when possible, with `nix copy` as the correctness fallback.
       # Sandbox sees a real /nix/store with cache-compatible prefix; can
       # `nix profile add nixpkgs#foo` and persist pkgs per-workspace.
-      _CHROOT_STATE_DIR="$OVERLAY_STATE_DIR/chroot"
+      _CHROOT_STATE_DIR="$OVERLAY_STATE_ACCESS_DIR/chroot"
+      _CHROOT_STATE_DISPLAY_DIR="$OVERLAY_STATE_DIR/chroot"
       _CHROOT_ROOT="$_CHROOT_STATE_DIR/merged"
       _CHROOT_MARKER="$_CHROOT_STATE_DIR/.source"
       _CHROOT_SRC="${closureInfoDrv}"
@@ -843,8 +1277,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         ${pkgs.coreutils}/bin/ln -s "$_gcpath" "$_GCROOTS_DIR/"
       done < "$_CHROOT_SRC/store-paths"
       BWRAP_ARGS+=(
-        --bind "$_CHROOT_ROOT/nix/store" /nix/store
-        --bind "$_CHROOT_ROOT/nix/var/nix" /nix/var/nix
+        --bind "$_CHROOT_STATE_DISPLAY_DIR/merged/nix/store" /nix/store
+        --bind "$_CHROOT_STATE_DISPLAY_DIR/merged/nix/var/nix" /nix/var/nix
       )
       '' else if cfg.experimental.nixStoreMode == "host-daemon" then ''
       # Host daemon store: expose host /nix/store read-only and delegate all
@@ -921,8 +1355,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         --setenv OCSB_STRATEGY "$WORKSPACE_STRATEGY"
         --setenv OCSB_NETWORK "${if dualLayerEnabled then "dual-layer" else networkMode}"
         --setenv OCSB_STATE_DIR "$OVERLAY_STATE_DIR"
-        --setenv OCSB_HOST_UID "$(${pkgs.coreutils}/bin/id -u)"
-        --setenv OCSB_HOST_GID "$(${pkgs.coreutils}/bin/id -g)"
+        --setenv OCSB_HOST_UID "$HOST_UID"
+        --setenv OCSB_HOST_GID "$HOST_GID"
         ${lib.optionalString dualLayerEnabled ''--setenv SHELL "${sandboxShell}"''}
         ${lib.optionalString dualLayerEnabled ''--setenv OCSB_DUAL_LAYER outer''}
       )
@@ -976,7 +1410,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       case "$WORKSPACE_STRATEGY" in
         overlayfs)
           _WORKSPACE_OVERLAY_STATE="$OVERLAY_STATE_DIR/overlay/workspace"
-          ${pkgs.coreutils}/bin/mkdir -p "$_WORKSPACE_OVERLAY_STATE/upper" "$_WORKSPACE_OVERLAY_STATE/work"
+          _WORKSPACE_OVERLAY_STATE_ACCESS="$OVERLAY_STATE_ACCESS_DIR/overlay/workspace"
+          ${pkgs.coreutils}/bin/mkdir -p "$_WORKSPACE_OVERLAY_STATE_ACCESS/upper" "$_WORKSPACE_OVERLAY_STATE_ACCESS/work"
           STRATEGY_FLAGS=(
             --overlay-src "$PROJECT_DIR"
             --overlay "$_WORKSPACE_OVERLAY_STATE/upper" "$_WORKSPACE_OVERLAY_STATE/work" "$WORKSPACE_SANDBOX_DIR"
@@ -990,22 +1425,11 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           echo "ocsb: direct mount (read-write, no isolation)" >&2
           ;;
         btrfs)
-          # btrfs strategy: create a snapshot of the project directory as workspace
           BTRFS_SNAP="$WS_DIR/snapshot"
-          if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$BTRFS_SNAP" ]]; then
+          BTRFS_SNAP_ACCESS="$PROJECT_ACCESS_DIR/$OCSB_BASE_DIR/$WORKSPACE_NAME/snapshot"
+          if [[ "$WORKSPACE_ACTION" == continue ]]; then
             echo "ocsb: reusing btrfs snapshot at $BTRFS_SNAP" >&2
           else
-            # Check if project dir is on btrfs and we can manage subvolumes
-            if ! _btrfs_probe "$PROJECT_DIR"; then
-              echo "ocsb: btrfs strategy unavailable: $_btrfs_probe_reason" >&2
-              echo "  Hint: ensure project dir is on btrfs and the filesystem is mounted with 'user_subvol_rm_allowed'." >&2
-              exit 1
-            fi
-            # Create a read-write snapshot of the project directory
-            if [[ -d "$BTRFS_SNAP" ]]; then
-              ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$BTRFS_SNAP" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$BTRFS_SNAP"
-            fi
-            ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$PROJECT_DIR" "$BTRFS_SNAP"
             echo "ocsb: created btrfs snapshot at $BTRFS_SNAP" >&2
           fi
           STRATEGY_FLAGS=(
@@ -1013,22 +1437,11 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           )
           ;;
         git-worktree)
-          # git-worktree strategy: create a worktree for the workspace
           GWT_DIR="$WS_DIR/worktree"
-          if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$GWT_DIR" ]]; then
+          GWT_DIR_ACCESS="$PROJECT_ACCESS_DIR/$OCSB_BASE_DIR/$WORKSPACE_NAME/worktree"
+          if [[ "$WORKSPACE_ACTION" == continue ]]; then
             echo "ocsb: reusing git worktree at $GWT_DIR" >&2
           else
-            # Verify we're in a git repo
-            if ! ${pkgs.git}/bin/git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
-              echo "ocsb: git-worktree strategy requires project directory to be a git repository" >&2
-              exit 1
-            fi
-            # Remove existing worktree if present
-            if [[ -d "$GWT_DIR" ]]; then
-              ${pkgs.git}/bin/git -C "$PROJECT_DIR" worktree remove --force "$GWT_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$GWT_DIR"
-            fi
-            # Create a detached worktree from HEAD
-            ${pkgs.git}/bin/git -C "$PROJECT_DIR" worktree add --detach "$GWT_DIR" HEAD
             echo "ocsb: created git worktree at $GWT_DIR" >&2
           fi
           STRATEGY_FLAGS=(
@@ -1064,7 +1477,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         _OVL_SANDBOX="''${OVERLAY_MOUNTS[$_OVL_IDX+1]}"
         _OVL_HASH="$(echo -n "$_OVL_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
         _OVL_STATE="$OVERLAY_STATE_DIR/overlay/mounts/ovl-$_OVL_HASH"
-        ${pkgs.coreutils}/bin/mkdir -p "$_OVL_STATE/upper" "$_OVL_STATE/work"
+        _OVL_STATE_ACCESS="$OVERLAY_STATE_ACCESS_DIR/overlay/mounts/ovl-$_OVL_HASH"
+        ${pkgs.coreutils}/bin/mkdir -p "$_OVL_STATE_ACCESS/upper" "$_OVL_STATE_ACCESS/work"
         BWRAP_ARGS+=(--overlay-src "$_OVL_HOST" --overlay "$_OVL_STATE/upper" "$_OVL_STATE/work" "$_OVL_SANDBOX")
         echo "ocsb: overlay mount $_OVL_HOST -> $_OVL_SANDBOX (state: $_OVL_STATE)" >&2
         _OVL_IDX=$((_OVL_IDX + 2))
@@ -1077,7 +1491,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         _SNAP_SANDBOX="''${SNAP_MOUNTS[$_SNAP_IDX+1]}"
         _SNAP_HASH="$(echo -n "$_SNAP_HOST" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
         _SNAP_DIR="$OVERLAY_STATE_DIR/snapshots/snap-$_SNAP_HASH"
-        if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$_SNAP_DIR" ]]; then
+        _SNAP_DIR_ACCESS="$OVERLAY_STATE_ACCESS_DIR/snapshots/snap-$_SNAP_HASH"
+        if [[ "$CONTINUE" -eq 1 ]] && [[ -d "$_SNAP_DIR_ACCESS" ]]; then
           echo "ocsb: reusing snapshot $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
         else
           # Detect btrfs subvolume by inode (subvol roots have inode 256)
@@ -1086,11 +1501,11 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             echo "ocsb: error: --snap-mount source must be a btrfs subvolume root: $_SNAP_HOST" >&2
             exit 1
           fi
-          if [[ -d "$_SNAP_DIR" ]]; then
-            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_SNAP_DIR" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_SNAP_DIR"
+          if [[ -d "$_SNAP_DIR_ACCESS" ]]; then
+            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_SNAP_DIR_ACCESS" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_SNAP_DIR_ACCESS"
           fi
-          ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR/snapshots"
-          ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$_SNAP_HOST" "$_SNAP_DIR"
+          ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_ACCESS_DIR/snapshots"
+          ${pkgs.btrfs-progs}/bin/btrfs subvolume snapshot "$_SNAP_HOST" "$_SNAP_DIR_ACCESS"
           echo "ocsb: snapshot mount $_SNAP_HOST -> $_SNAP_SANDBOX" >&2
         fi
         BWRAP_ARGS+=(--bind "$_SNAP_DIR" "$_SNAP_SANDBOX")
@@ -1117,8 +1532,8 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         --uid 0
         --gid 0
         '' else ''
-        --uid "$(${pkgs.coreutils}/bin/id -u)"
-        --gid "$(${pkgs.coreutils}/bin/id -g)"
+        --uid "$HOST_UID"
+        --gid "$HOST_GID"
         ''}
         --dev /dev
         --proc /proc
@@ -1131,14 +1546,14 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         ${if networkMode == "filtered" && !dualLayerEnabled then
           ''--ro-bind "${customResolvConf}" /etc/resolv.conf''
         else
-          "--ro-bind-try /etc/resolv.conf /etc/resolv.conf"
+          ''--ro-bind-try "$(resolve_builtin_host_path /etc/resolv.conf)" /etc/resolv.conf''
         }
-        --ro-bind-try /etc/ssl /etc/ssl
-        --ro-bind-try /etc/static/ssl /etc/static/ssl
-        --ro-bind-try /etc/nix /etc/nix
-        --ro-bind-try /etc/passwd /etc/passwd
-        --ro-bind-try /etc/group /etc/group
-        --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf
+        --ro-bind-try "$(resolve_builtin_host_path /etc/ssl)" /etc/ssl
+        --ro-bind-try "$(resolve_builtin_host_path /etc/static/ssl)" /etc/static/ssl
+        --ro-bind-try "$(resolve_builtin_host_path /etc/nix)" /etc/nix
+        --ro-bind-try "$(resolve_builtin_host_path /etc/passwd)" /etc/passwd
+        --ro-bind-try "$(resolve_builtin_host_path /etc/group)" /etc/group
+        --ro-bind-try "$(resolve_builtin_host_path /etc/nsswitch.conf)" /etc/nsswitch.conf
 
         --symlink usr/lib /lib
         --symlink usr/lib64 /lib64
@@ -1154,6 +1569,10 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     }
 
     exec_sandbox() {
+      # Freeze every host-side bwrap source into the immutable helper manifest
+      # before translating the plan to any backend-specific argv.
+      tokenize_bwrap_mount_sources
+
       if [[ "$BACKEND_TYPE" == "podman" ]]; then
         if [[ "${if dualLayerEnabled then "1" else "0"}" == "1" ]]; then
           echo "ocsb: experimental.dualLayer is bubblewrap-only" >&2
@@ -1163,14 +1582,22 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           echo "ocsb: backend 'podman' does not support overlayfs workspace or --overlay-mount in v1" >&2
           exit 1
         fi
-        if ! command -v podman >/dev/null 2>&1; then
-          echo "ocsb: backend 'podman' requires podman on the host PATH" >&2
+        if [[ -n "''${CONTAINER_HOST:-}" || -n "''${CONTAINER_CONNECTION:-}" ]]; then
+          echo "ocsb: backend 'podman' refuses remote connections when private mount anchors are required" >&2
           exit 1
         fi
+        _PODMAN_BIN="$(type -P podman)" || {
+          echo "ocsb: backend 'podman' requires podman on the host PATH" >&2
+          exit 1
+        }
+        _PODMAN_BIN="$(${pkgs.coreutils}/bin/readlink -e -- "$_PODMAN_BIN")" || {
+          echo "ocsb: backend 'podman' executable cannot be resolved safely" >&2
+          exit 1
+        }
         prepare_container_rootfs
         build_container_plan_from_bwrap_args
         _CONTAINER_NAME="ocsb-${cfg.app.name}-$(${pkgs.coreutils}/bin/printf '%s' "$OVERLAY_STATE_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
-        PODMAN_ARGS=(run --rm --name "$_CONTAINER_NAME" --userns=keep-id --user "$(${pkgs.coreutils}/bin/id -u):$(${pkgs.coreutils}/bin/id -g)" --workdir "$CONTAINER_WORKDIR")
+        PODMAN_ARGS=(run --rm --name "$_CONTAINER_NAME" --userns=keep-id --user "$HOST_UID:$HOST_GID" --workdir "$CONTAINER_WORKDIR")
         case "${networkMode}" in
           host) PODMAN_ARGS+=(--network host) ;;
           blocked) PODMAN_ARGS+=(--network none) ;;
@@ -1180,10 +1607,38 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         append_podman_env_args
         if [[ -n "${podmanExtraArgs}" ]]; then
           # shellcheck disable=SC2206
-          PODMAN_ARGS+=(${podmanExtraArgs})
+          _PODMAN_EXTRA_ARGS=(${podmanExtraArgs})
+          for _PODMAN_ARG in "''${_PODMAN_EXTRA_ARGS[@]}"; do
+            case "$_PODMAN_ARG" in
+              --annotation=*|--cap-add=*|--cap-drop=*|--cpus=*|--cpu-period=*|--cpu-quota=*|--cpu-shares=*|--cpuset-cpus=*|--cpuset-mems=*|--memory=*|--memory-reservation=*|--memory-swap=*|--memory-swappiness=*|--pids-limit=*|--ulimit=*|--restart=*|--stop-signal=*|--stop-timeout=*|--timeout=*|--hostname=*|--add-host=*|--dns=*|--dns-option=*|--dns-search=*|--shm-size=*|--systemd=*|--log-driver=*|--read-only|--replace)
+                ;;
+              *)
+                echo "ocsb: backend.podman.extraArgs cannot add host path sources; use ocsb mounts" >&2
+                exit 1
+                ;;
+            esac
+          done
+          PODMAN_ARGS+=("''${_PODMAN_EXTRA_ARGS[@]}")
         fi
-        echo "$_CONTAINER_NAME" > "$OVERLAY_STATE_DIR/.backend-instance"
-        exec podman "''${PODMAN_ARGS[@]}" --rootfs "$CONTAINER_ROOTFS" "''${SANDBOX_CMD[@]}"
+        for _PODMAN_ARG in "''${PODMAN_ARGS[@]}"; do
+          case "$_PODMAN_ARG" in
+            --remote|-r|--remote=*|-r=*|--url|--url=*|--connection|--connection=*)
+              echo "ocsb: backend 'podman' refuses remote connections when private mount anchors are required" >&2
+              exit 1
+              ;;
+          esac
+        done
+        register_mount_anchor_source "$CONTAINER_ROOTFS" required
+        _CONTAINER_ROOTFS_TOKEN="$MOUNT_ANCHOR_REGISTERED_TOKEN"
+        PODMAN_BACKEND_ARGV=("$_PODMAN_BIN" --remote=false "''${PODMAN_ARGS[@]}" --rootfs "$_CONTAINER_ROOTFS_TOKEN" "''${SANDBOX_CMD[@]}")
+        build_mount_anchor_helper_args podman current PODMAN_BACKEND_ARGV
+        echo "$_CONTAINER_NAME" > "$OVERLAY_STATE_ACCESS_DIR/.backend-instance"
+        if [[ "$HOST_UID" == 0 ]]; then
+          exec ${mountAnchor}/bin/ocsb-mount-anchor \
+            "''${MOUNT_ANCHOR_ARGS[@]}" -- "''${PODMAN_BACKEND_ARGV[@]}"
+        fi
+        exec "$_PODMAN_BIN" --remote=false unshare ${mountAnchor}/bin/ocsb-mount-anchor \
+          "''${MOUNT_ANCHOR_ARGS[@]}" -- "''${PODMAN_BACKEND_ARGV[@]}"
       fi
 
       if [[ "$BACKEND_TYPE" == "systemd-nspawn" ]]; then
@@ -1199,69 +1654,305 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
           echo "ocsb: backend 'systemd-nspawn' supports only host or blocked networking in v1" >&2
           exit 1
         fi
-        if ! command -v systemd-nspawn >/dev/null 2>&1; then
+        _NSPAWN_BIN="$(type -P systemd-nspawn)" || {
           echo "ocsb: backend 'systemd-nspawn' requires systemd-nspawn on the host PATH" >&2
           exit 1
-        fi
+        }
+        _NSPAWN_BIN="$(${pkgs.coreutils}/bin/readlink -e -- "$_NSPAWN_BIN")" || {
+          echo "ocsb: backend 'systemd-nspawn' executable cannot be resolved safely" >&2
+          exit 1
+        }
         prepare_container_rootfs
         build_container_plan_from_bwrap_args
         _MACHINE_NAME="ocsb-${cfg.app.name}-$(${pkgs.coreutils}/bin/printf '%s' "$OVERLAY_STATE_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-12)"
-        NSPAWN_ARGS=(--quiet --directory="$CONTAINER_ROOTFS" --machine="$_MACHINE_NAME" --user="$(${pkgs.coreutils}/bin/id -u)" --chdir="$CONTAINER_WORKDIR")
+        register_mount_anchor_source "$CONTAINER_ROOTFS" required
+        _CONTAINER_ROOTFS_TOKEN="$MOUNT_ANCHOR_REGISTERED_TOKEN"
+        NSPAWN_ARGS=(--quiet --directory="$_CONTAINER_ROOTFS_TOKEN" --machine="$_MACHINE_NAME" --user="$HOST_UID" --chdir="$CONTAINER_WORKDIR")
         [[ "${networkMode}" == "blocked" ]] && NSPAWN_ARGS+=(--private-network)
         append_nspawn_mount_args
         append_nspawn_env_args
         if [[ -n "${nspawnExtraArgs}" ]]; then
           # shellcheck disable=SC2206
-          NSPAWN_ARGS+=(${nspawnExtraArgs})
+          _NSPAWN_EXTRA_ARGS=(${nspawnExtraArgs})
+          for _NSPAWN_ARG in "''${_NSPAWN_EXTRA_ARGS[@]}"; do
+            case "$_NSPAWN_ARG" in
+              --slice=*|--register=*|--console=*|--kill-signal=*|--notify-ready=*|--suppress-sync=*|--capability=*|--drop-capability=*|--ambient-capability=*|--hostname=*|--port=*|--read-only|--volatile=*|--keep-unit|--collect|--as-pid2|--boot|--quiet)
+                ;;
+              *)
+                echo "ocsb: backend.systemdNspawn.extraArgs cannot add host path sources; use ocsb mounts" >&2
+                exit 1
+                ;;
+            esac
+          done
+          NSPAWN_ARGS+=("''${_NSPAWN_EXTRA_ARGS[@]}")
         fi
-        echo "$_MACHINE_NAME" > "$OVERLAY_STATE_DIR/.backend-instance"
-        exec systemd-nspawn "''${NSPAWN_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
+        NSPAWN_BACKEND_ARGV=("$_NSPAWN_BIN" "''${NSPAWN_ARGS[@]}" -- "''${SANDBOX_CMD[@]}")
+        build_mount_anchor_helper_args systemd-nspawn current NSPAWN_BACKEND_ARGV
+        echo "$_MACHINE_NAME" > "$OVERLAY_STATE_ACCESS_DIR/.backend-instance"
+        exec ${mountAnchor}/bin/ocsb-mount-anchor \
+          "''${MOUNT_ANCHOR_ARGS[@]}" -- "''${NSPAWN_BACKEND_ARGV[@]}"
       fi
 
       ${if networkMode == "filtered" && !dualLayerEnabled then ''
-      _NET_TMP="$(${pkgs.coreutils}/bin/mktemp -d)"
-      _SLIRP_PID=""
-
-      _cleanup_net() {
-        [[ -n "$_SLIRP_PID" ]] && kill "$_SLIRP_PID" 2>/dev/null || true
-        ${pkgs.coreutils}/bin/rm -rf "$_NET_TMP"
+      _filtered_proc_group() {
+        local _pid="$1" _stat _rest _field _index=1
+        [[ "$_pid" =~ ^[1-9][0-9]*$ && -r "/proc/$_pid/stat" ]] || return 1
+        IFS= read -r _stat < "/proc/$_pid/stat" || return 1
+        _rest="''${_stat##*) }"
+        for _field in $_rest; do
+          if [[ $_index -eq 3 ]]; then
+            [[ "$_field" =~ ^[1-9][0-9]*$ ]] || return 1
+            printf '%s\n' "$_field"
+            return 0
+          fi
+          _index=$((_index + 1))
+        done
+        return 1
       }
-      trap _cleanup_net EXIT
 
-      ${pkgs.coreutils}/bin/mkfifo "$_NET_TMP/info"
+      _filtered_exact_live() {
+        local _pid="$1" _start="$2" _actual _state
+        _actual="$(ocsb_proc_start_time "$_pid" 2>/dev/null)" || return 1
+        [[ "$_actual" == "$_start" ]] || return 1
+        _state="$(ocsb__proc_state "$_pid" 2>/dev/null)" || return 1
+        [[ "$_state" != Z && "$_state" != X && "$_state" != x ]]
+      }
 
-      # Reader runs in background: waits for bwrap to write child PID to the
-      # fifo, then launches slirp4netns. bwrap itself runs in the FOREGROUND
-      # via exec so it owns the controlling tty's foreground process group;
-      # otherwise apps that call tcsetattr() (raw-mode TUIs like ironclaw's
-      # dialoguer prompts) get EIO/SIGTTOU and silently fall back to
-      # non-interactive mode, auto-defaulting every prompt.
-      #
-      # Two cleanup-critical details:
-      #   1. `exec 9>&-` releases the workspace flock fd that this subshell
-      #      inherited from the launcher. Otherwise slirp4netns would hold
-      #      the lock open after bwrap dies, blocking subsequent launches
-      #      with "workspace is locked by another process".
-      #   2. `setpriv --pdeathsig=TERM` makes slirp4netns die when its
-      #      parent (bwrap, post-exec) dies. Without it, slirp4netns
-      #      orphans to PID 1 and leaks indefinitely.
-      (
-        _CHILD_PID=$(${pkgs.coreutils}/bin/timeout 10 ${pkgs.jq}/bin/jq -r '.["child-pid"]' < "$_NET_TMP/info") || exit 1
-        exec 9>&-
-        exec ${pkgs.util-linux}/bin/setpriv --pdeathsig=TERM -- ${pkgs.slirp4netns}/bin/slirp4netns --configure --disable-host-loopback "$_CHILD_PID" tap0
-      ) &
-      _SLIRP_PID=$!
+      _filtered_terminate_exact_child() {
+        local _pid="$1" _start="$2" _attempt _state
+        [[ "$_pid" =~ ^[1-9][0-9]*$ ]] || return 0
+        if [[ ! "$_start" =~ ^[1-9][0-9]*$ ]]; then
+          # Every caller passes an unreaped direct child from $!. Such a PID
+          # cannot be reused before wait, even if procfs start capture failed.
+          kill -TERM "$_pid" 2>/dev/null || true
+          for ((_attempt = 0; _attempt < 50; _attempt++)); do
+            kill -0 "$_pid" 2>/dev/null || break
+            _state="$(ocsb__proc_state "$_pid" 2>/dev/null)" || break
+            [[ "$_state" == Z || "$_state" == X || "$_state" == x ]] && break
+            ${pkgs.coreutils}/bin/sleep 0.02
+          done
+          kill -0 "$_pid" 2>/dev/null && kill -KILL "$_pid" 2>/dev/null || true
+          wait "$_pid" 2>/dev/null || true
+          return 0
+        fi
+        if _filtered_exact_live "$_pid" "$_start"; then
+          kill -TERM "$_pid" 2>/dev/null || true
+          for ((_attempt = 0; _attempt < 50; _attempt++)); do
+            _filtered_exact_live "$_pid" "$_start" || break
+            ${pkgs.coreutils}/bin/sleep 0.02
+          done
+          if _filtered_exact_live "$_pid" "$_start"; then
+            kill -KILL "$_pid" 2>/dev/null || true
+          fi
+        fi
+        wait "$_pid" 2>/dev/null || true
+      }
 
-      record_attach_pidfile
-      exec ${pkgs.bubblewrap}/bin/bwrap \
-        "''${BWRAP_ARGS[@]}" \
-        --info-fd 3 \
-        -- ${networkSetupScript} "''${SANDBOX_CMD[@]}" \
+      _filtered_remove_paths() {
+        ${pkgs.coreutils}/bin/rm -f -- \
+          "$_NET_INFO" "$_NET_READY" "$_NET_READY.tmp" \
+          "$_NET_CHILD_JSON" "$_NET_MONITOR_LOG"
+        ${pkgs.coreutils}/bin/rmdir -- "$_NET_TMP" 2>/dev/null || true
+      }
+
+      _filtered_monitor() {
+        local _MONITOR_PID="$BASHPID" _MONITOR_START=""
+        local _READER_PID="" _READER_START="" _SLIRP_PID="" _SLIRP_START=""
+        local _MONITOR_CLEANING=0 _CHILD_PID="" _attempt _actual _state _fd_path _fd
+
+        # Drop the workspace lock and every unrelated inherited descriptor
+        # before publishing readiness. slirp is forked only after this point.
+        for _fd_path in /proc/self/fd/*; do
+          _fd="''${_fd_path##*/}"
+          [[ "$_fd" =~ ^[0-9]+$ ]] || continue
+          case "$_fd" in
+            0|1|2) ;;
+            *) eval "exec $_fd>&-" 2>/dev/null || true ;;
+          esac
+        done
+        # The monitor never reads from or writes to the controlling terminal.
+        # Keep stderr attached so slirp capability failures remain diagnosable.
+        exec </dev/null >/dev/null
+
+        _filtered_monitor_cleanup() {
+          [[ $_MONITOR_CLEANING -eq 0 ]] || return 0
+          _MONITOR_CLEANING=1
+          if [[ -n "$_READER_PID" ]]; then
+            _filtered_terminate_exact_child "$_READER_PID" "$_READER_START"
+            _READER_PID=""
+          fi
+          if [[ -n "$_SLIRP_PID" ]]; then
+            _filtered_terminate_exact_child "$_SLIRP_PID" "$_SLIRP_START"
+            _SLIRP_PID=""
+          fi
+          _filtered_remove_paths
+        }
+        trap '_filtered_monitor_cleanup' EXIT
+        trap '_filtered_monitor_cleanup; exit 0' HUP INT TERM
+
+        _MONITOR_START="$(ocsb_proc_start_time "$_MONITOR_PID")" || exit 1
+        ${pkgs.util-linux}/bin/setpriv --pdeathsig=TERM -- \
+          ${pkgs.coreutils}/bin/timeout 10 \
+          ${pkgs.coreutils}/bin/cat -- "$_NET_INFO" > "$_NET_CHILD_JSON" &
+        _READER_PID=$!
+        for ((_attempt = 0; _attempt < 50; _attempt++)); do
+          _READER_START="$(ocsb_proc_start_time "$_READER_PID" 2>/dev/null)" && break
+          ${pkgs.coreutils}/bin/sleep 0.01
+        done
+        [[ -n "$_READER_START" ]] || exit 1
+        _filtered_exact_live "$_READER_PID" "$_READER_START" || exit 1
+
+        printf 'v1\t%s\t%s\t%s\t%s\t%s\n' \
+          "$_MONITOR_PID" "$_MONITOR_START" \
+          "$_NET_LAUNCHER_PID" "$_NET_LAUNCHER_START" "$_NET_LAUNCHER_PGID" \
+          > "$_NET_READY.tmp"
+        ${pkgs.coreutils}/bin/mv -f -T -- "$_NET_READY.tmp" "$_NET_READY"
+
+        if ! wait "$_READER_PID"; then
+          _READER_PID=""
+          exit 1
+        fi
+        _READER_PID=""
+
+        # The one-shot handoff is complete; remove both rendezvous paths before
+        # parsing or starting slirp so neither can leak into its descriptor set.
+        ${pkgs.coreutils}/bin/rm -f -- "$_NET_INFO" "$_NET_READY"
+        _CHILD_PID="$(${pkgs.jq}/bin/jq -er \
+          '.["child-pid"] | select(type == "number" and . > 0 and . == floor) | tostring' \
+          "$_NET_CHILD_JSON")" || exit 1
+        ${pkgs.coreutils}/bin/rm -f -- "$_NET_CHILD_JSON"
+        [[ "$_CHILD_PID" =~ ^[1-9][0-9]*$ ]] || exit 1
+
+        ${pkgs.util-linux}/bin/setpriv --pdeathsig=TERM -- \
+          ${pkgs.slirp4netns}/bin/slirp4netns \
+          --configure --disable-host-loopback "$_CHILD_PID" tap0 &
+        _SLIRP_PID=$!
+        for ((_attempt = 0; _attempt < 50; _attempt++)); do
+          _SLIRP_START="$(ocsb_proc_start_time "$_SLIRP_PID" 2>/dev/null)" && break
+          ${pkgs.coreutils}/bin/sleep 0.01
+        done
+        [[ -n "$_SLIRP_START" ]] || exit 1
+
+        while :; do
+          _actual="$(ocsb_proc_start_time "$_NET_LAUNCHER_PID" 2>/dev/null)" || break
+          [[ "$_actual" == "$_NET_LAUNCHER_START" ]] || break
+          _state="$(ocsb__proc_state "$_NET_LAUNCHER_PID" 2>/dev/null)" || break
+          [[ "$_state" == Z || "$_state" == X || "$_state" == x ]] && break
+          ${pkgs.coreutils}/bin/sleep 0.02
+        done
+
+        _filtered_monitor_cleanup
+        trap - EXIT HUP INT TERM
+      }
+
+      _NET_LAUNCHER_PID=$$
+      _NET_LAUNCHER_START="$(ocsb_proc_start_time "$_NET_LAUNCHER_PID")" || {
+        echo "ocsb: cannot capture filtered-network launcher start time" >&2
+        exit 1
+      }
+      _NET_LAUNCHER_PGID="$(_filtered_proc_group "$_NET_LAUNCHER_PID")" || {
+        echo "ocsb: cannot capture filtered-network launcher process group" >&2
+        exit 1
+      }
+      _NET_TMP_PARENT="$OCSB_RUNTIME_DIR/filtered-network"
+      ${pkgs.coreutils}/bin/install -d -m 0700 -- "$_NET_TMP_PARENT"
+      read -r _NET_PARENT_OWNER _NET_PARENT_MODE < <(${pkgs.coreutils}/bin/stat -c '%u %a' -- "$_NET_TMP_PARENT") || exit 1
+      if [[ -L "$_NET_TMP_PARENT" || ! -d "$_NET_TMP_PARENT" || \
+            "$_NET_PARENT_OWNER" != "$HOST_UID" || "$_NET_PARENT_MODE" != 700 ]]; then
+        echo "ocsb: unsafe filtered-network temp parent: $_NET_TMP_PARENT" >&2
+        exit 1
+      fi
+      _NET_TMP="$(umask 077; ${pkgs.coreutils}/bin/mktemp -d "$_NET_TMP_PARENT/net.XXXXXX")"
+      _NET_INFO="$_NET_TMP/info"
+      _NET_READY="$_NET_TMP/MONITOR_READY"
+      _NET_CHILD_JSON="$_NET_TMP/child-pid.json"
+      _NET_MONITOR_LOG="$_NET_TMP/monitor.log"
+      if ! ${pkgs.coreutils}/bin/mkfifo -m 0600 -- "$_NET_INFO"; then
+        _filtered_remove_paths
+        echo "ocsb: cannot create filtered-network info FIFO" >&2
+        exit 1
+      fi
+
+      _filtered_monitor &
+      _NET_MONITOR_PID=$!
+      _NET_MONITOR_START=""
+      for ((_NET_WAIT = 0; _NET_WAIT < 40; _NET_WAIT++)); do
+        _NET_MONITOR_START="$(ocsb_proc_start_time "$_NET_MONITOR_PID" 2>/dev/null)" && break
+        ${pkgs.coreutils}/bin/sleep 0.01
+      done
+      if [[ -z "$_NET_MONITOR_START" ]]; then
+        # An unreaped direct child cannot be replaced by PID reuse, so $! is
+        # still an exact identity even when procfs failed before start capture.
+        kill -TERM "$_NET_MONITOR_PID" 2>/dev/null || true
+        for ((_NET_WAIT = 0; _NET_WAIT < 40; _NET_WAIT++)); do
+          kill -0 "$_NET_MONITOR_PID" 2>/dev/null || break
+          ${pkgs.coreutils}/bin/sleep 0.01
+        done
+        kill -KILL "$_NET_MONITOR_PID" 2>/dev/null || true
+        wait "$_NET_MONITOR_PID" 2>/dev/null || true
+        _filtered_remove_paths
+        echo "ocsb: cannot capture filtered-network monitor start time" >&2
+        exit 1
+      fi
+
+      _NET_LAUNCHER_ABORTED=0
+      _filtered_launcher_abort() {
+        [[ $_NET_LAUNCHER_ABORTED -eq 0 ]] || return 0
+        _NET_LAUNCHER_ABORTED=1
+        _filtered_terminate_exact_child "$_NET_MONITOR_PID" "$_NET_MONITOR_START"
+        _filtered_remove_paths
+      }
+      trap '_filtered_launcher_abort' EXIT
+      trap '_filtered_launcher_abort; exit 1' HUP INT TERM
+
+      _NET_READY_OK=0
+      for ((_NET_WAIT = 0; _NET_WAIT < 40; _NET_WAIT++)); do
+        if [[ -r "$_NET_READY" ]]; then
+          IFS=$'\t' read -r _NET_READY_VERSION _NET_READY_PID _NET_READY_START \
+            _NET_READY_LAUNCHER_PID _NET_READY_LAUNCHER_START _NET_READY_LAUNCHER_PGID \
+            < "$_NET_READY" || true
+          if [[ "$_NET_READY_VERSION" == v1 && \
+                "$_NET_READY_PID" == "$_NET_MONITOR_PID" && \
+                "$_NET_READY_START" == "$_NET_MONITOR_START" && \
+                "$_NET_READY_LAUNCHER_PID" == "$_NET_LAUNCHER_PID" && \
+                "$_NET_READY_LAUNCHER_START" == "$_NET_LAUNCHER_START" && \
+                "$_NET_READY_LAUNCHER_PGID" == "$_NET_LAUNCHER_PGID" && \
+                ! -e "/proc/$_NET_MONITOR_PID/fd/9" ]] && \
+             _filtered_exact_live "$_NET_MONITOR_PID" "$_NET_MONITOR_START"; then
+            _NET_READY_OK=1
+            break
+          fi
+        fi
+        _filtered_exact_live "$_NET_MONITOR_PID" "$_NET_MONITOR_START" || break
+        ${pkgs.coreutils}/bin/sleep 0.01
+      done
+      if [[ $_NET_READY_OK -ne 1 ]]; then
+        echo "ocsb: filtered-network monitor did not become ready" >&2
+        exit 1
+      fi
+
+      record_attach_process
+      BUBBLEWRAP_BACKEND_ARGV=(
+        ${pkgs.bubblewrap}/bin/bwrap
+        "''${BWRAP_ARGS[@]}"
+        --info-fd 3
+        -- ${networkSetupScript} "''${SANDBOX_CMD[@]}"
+      )
+      build_mount_anchor_helper_args bubblewrap bubblewrap-user BUBBLEWRAP_BACKEND_ARGV
+      exec ${mountAnchor}/bin/ocsb-mount-anchor \
+        "''${MOUNT_ANCHOR_ARGS[@]}" -- "''${BUBBLEWRAP_BACKEND_ARGV[@]}" \
         3>"$_NET_TMP/info"
       '' else ''
       # Simple exec: host network or no network
-      record_attach_pidfile
-      exec ${pkgs.bubblewrap}/bin/bwrap "''${BWRAP_ARGS[@]}" -- "''${SANDBOX_CMD[@]}"
+      record_attach_process
+      BUBBLEWRAP_BACKEND_ARGV=(
+        ${pkgs.bubblewrap}/bin/bwrap
+        "''${BWRAP_ARGS[@]}"
+        -- "''${SANDBOX_CMD[@]}"
+      )
+      build_mount_anchor_helper_args bubblewrap bubblewrap-user BUBBLEWRAP_BACKEND_ARGV
+      exec ${mountAnchor}/bin/ocsb-mount-anchor \
+        "''${MOUNT_ANCHOR_ARGS[@]}" -- "''${BUBBLEWRAP_BACKEND_ARGV[@]}"
       ''}
     }
 
@@ -1271,7 +1962,25 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     WORKSPACE_NAME=${lib.escapeShellArg cfg.workspace.name}
     WORKSPACE_STRATEGY=${lib.escapeShellArg cfg.workspace.strategy}
     WORKSPACE_SANDBOX_DIR=${lib.escapeShellArg cfg.workspace.sandboxDir}
-    PROJECT_DIR="$(${pkgs.coreutils}/bin/realpath "$(pwd)")"
+    PROJECT_DIR=""
+    PROJECT_ACCESS_DIR=""
+    STATE_BASE_DIR=""
+    STATE_BASE_ACCESS_DIR=""
+    OVERLAY_STATE_DIR=""
+    OVERLAY_STATE_ACCESS_DIR=""
+    INHERITED_FD_ARGS=()
+    INHERITED_FD_ROLES=()
+    INHERITED_FD_DISPLAYS=()
+    INHERITED_FD_NUMBERS=()
+    INHERITED_FD_DEVS=()
+    INHERITED_FD_INOS=()
+    INHERITED_FD_TYPES=()
+    INHERITED_PROJECT_FD=""
+    INHERITED_PROJECT_DISPLAY=""
+    INHERITED_PROJECT_DEV=""
+    INHERITED_PROJECT_INO=""
+    INHERITED_STATE_BASE_FD=""
+    INHERITED_STATE_BASE_DISPLAY=""
     CONTINUE=0
     OVERWRITE=0
     RUNTIME_MOUNTS=()
@@ -1279,6 +1988,7 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     RUNTIME_ENV_VALUES=()
     OVERLAY_MOUNTS=()
     SNAP_MOUNTS=()
+    ATTACH_TARGET=""
 
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -1298,6 +2008,16 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
             bubblewrap|podman|systemd-nspawn) BACKEND_TYPE="$2" ;;
             *) echo "ocsb: unknown backend: $2" >&2; exit 1 ;;
           esac
+          shift 2 ;;
+        --attach)
+          ATTACH_TARGET="auto"; shift ;;
+        --attach=*)
+          ATTACH_TARGET="''${1#--attach=}"
+          [[ -n "$ATTACH_TARGET" ]] || { echo "ocsb: --attach requires a PID when using '='" >&2; exit 1; }
+          shift ;;
+        --ocsb-internal-fd-root)
+          [[ $# -ge 2 ]] || { echo "ocsb: $1 requires a descriptor specification" >&2; exit 1; }
+          parse_inherited_fd_root_spec "$2"
           shift 2 ;;
         --env)
           [[ $# -ge 2 ]] || { echo "ocsb: $1 requires NAME or NAME=VALUE" >&2; exit 1; }
@@ -1405,6 +2125,20 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
       esac
     done
 
+    if [[ ''${#INHERITED_FD_ARGS[@]} -gt 0 ]]; then
+      if [[ -z "$INHERITED_PROJECT_FD" || -z "$INHERITED_STATE_BASE_FD" ]]; then
+        echo "ocsb: inherited descriptor set requires exactly one project and one state-base root" >&2
+        exit 1
+      fi
+    fi
+    if [[ -n "$INHERITED_PROJECT_FD" ]]; then
+      PROJECT_DIR="$INHERITED_PROJECT_DISPLAY"
+      PROJECT_ACCESS_DIR="/proc/self/fd/$INHERITED_PROJECT_FD"
+    else
+      PROJECT_DIR="$(${pkgs.coreutils}/bin/realpath "$(pwd)")"
+      PROJECT_ACCESS_DIR="$PROJECT_DIR"
+    fi
+
     # =========================================================
     # Workspace name validation (prevent path traversal)
     # =========================================================
@@ -1448,39 +2182,39 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     validate_workspace_name "$WORKSPACE_NAME" || exit 1
 
     # =========================================================
-    # btrfs probe: returns 0 if dir is on btrfs AND current user can
-    # create AND delete subvolumes there (needs user_subvol_rm_allowed
-    # mount option for unprivileged delete). Sets _btrfs_probe_reason.
-    # rc=1 not btrfs / rc=2 btrfs but no perm.
+    # Non-mutating workspace state and process identity
     # =========================================================
-    _btrfs_probe_reason=""
-    _btrfs_probe() {
-      local _dir="$1"
-      local _fstype
-      _fstype="$(${pkgs.coreutils}/bin/stat -f -c %T "$_dir" 2>/dev/null)"
-      if [[ "$_fstype" != "btrfs" ]]; then
-        _btrfs_probe_reason="not a btrfs filesystem (fstype=$_fstype)"
-        return 1
+    OCSB_BASE_DIR=${lib.escapeShellArg cfg.workspace.baseDir}
+    OCSB_DIR="$PROJECT_DIR/$OCSB_BASE_DIR"
+    WS_DIR="$OCSB_DIR/$WORKSPACE_NAME"
+
+    PROJECT_HASH="$(echo -n "$PROJECT_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)"
+    if [[ -n "''${OCSB_STATE_BASE_DIR:-}" ]]; then
+      if [[ "$OCSB_STATE_BASE_DIR" != /* ]]; then
+        echo "ocsb: OCSB_STATE_BASE_DIR must be absolute: $OCSB_STATE_BASE_DIR" >&2
+        exit 1
       fi
-      local _dir_ino
-      _dir_ino="$(${pkgs.coreutils}/bin/stat -c %i "$_dir" 2>/dev/null || echo 0)"
-      if [[ "$_dir_ino" != "256" ]]; then
-        _btrfs_probe_reason="$_dir is not a btrfs subvolume root"
-        return 1
+      STATE_BASE_DIR="$(${pkgs.coreutils}/bin/realpath -m "$OCSB_STATE_BASE_DIR")"
+    else
+      STATE_BASE_DIR="$HOME/.cache/ocsb/$PROJECT_HASH"
+    fi
+    if [[ -n "$INHERITED_STATE_BASE_FD" ]]; then
+      if [[ "$STATE_BASE_DIR" != "$INHERITED_STATE_BASE_DISPLAY" ]]; then
+        echo "ocsb: inherited state-base display does not match OCSB_STATE_BASE_DIR: $INHERITED_STATE_BASE_DISPLAY" >&2
+        exit 1
       fi
-      local _probe="$_dir/.ocsb-btrfs-probe.$$"
-      if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume create "$_probe" &>/dev/null; then
-        _btrfs_probe_reason="cannot create subvolume in $_dir (permission denied)"
-        return 1
-      fi
-      if ! ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_probe" &>/dev/null; then
-        ${pkgs.coreutils}/bin/rm -rf "$_probe" 2>/dev/null || true
-        _btrfs_probe_reason="cannot delete subvolume (mount with 'user_subvol_rm_allowed' or run as root)"
-        return 2
-      fi
-      _btrfs_probe_reason=""
-      return 0
-    }
+      STATE_BASE_ACCESS_DIR="/proc/self/fd/$INHERITED_STATE_BASE_FD"
+    else
+      STATE_BASE_ACCESS_DIR="$STATE_BASE_DIR"
+    fi
+    OVERLAY_STATE_DIR="$STATE_BASE_DIR/$WORKSPACE_NAME"
+    OVERLAY_STATE_ACCESS_DIR="$STATE_BASE_ACCESS_DIR/$WORKSPACE_NAME"
+    OCSB_PROCESS_ROLE=${lib.escapeShellArg "sandbox:${cfg.app.name}"}
+    OCSB_INSTANCE="$(ocsb_instance_digest "$OCSB_PROCESS_ROLE" "$OVERLAY_STATE_DIR")"
+    OCSB_PROCESS_RECORD="$(ocsb_process_record_path "$OCSB_PROCESS_ROLE" "$OVERLAY_STATE_DIR")"
+    OCSB_RUNTIME_DIR="''${OCSB_PROCESS_RECORD%/*}"
+
+    maybe_attach
 
     # Validate strategy before creating any state
     case "$WORKSPACE_STRATEGY" in
@@ -1490,19 +2224,6 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
         exit 1
         ;;
     esac
-
-    # =========================================================
-    # Auto-detect: resolve 'auto' to btrfs or overlayfs
-    # =========================================================
-    if [[ "$WORKSPACE_STRATEGY" == "auto" ]]; then
-      if _btrfs_probe "$PROJECT_DIR"; then
-        WORKSPACE_STRATEGY="btrfs"
-        echo "ocsb: auto-detected btrfs filesystem with subvolume perms, using btrfs snapshot strategy" >&2
-      else
-        WORKSPACE_STRATEGY="overlayfs"
-        echo "ocsb: btrfs unavailable ($_btrfs_probe_reason), using overlayfs strategy" >&2
-      fi
-    fi
 
     if [[ "$BACKEND_TYPE" != "bubblewrap" && "$WORKSPACE_STRATEGY" == "overlayfs" ]]; then
       echo "ocsb: backend '$BACKEND_TYPE' does not support workspace.strategy=overlayfs in v1; use direct, btrfs, git-worktree, or bubblewrap" >&2
@@ -1522,129 +2243,240 @@ exec ${pkgs.bashInteractive}/bin/bash -i'
     fi
 
     # =========================================================
-    # Workspace directory setup
-    # =========================================================
-    OCSB_BASE_DIR=${lib.escapeShellArg cfg.workspace.baseDir}
-    OCSB_DIR="$PROJECT_DIR/$OCSB_BASE_DIR"
-    WS_DIR="$OCSB_DIR/$WORKSPACE_NAME"
-
-    # =========================================================
-    # Symlink escape protection
-    # =========================================================
-    OCSB_DIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$OCSB_DIR")"
-    WS_DIR_REAL="$(${pkgs.coreutils}/bin/realpath -m "$WS_DIR")"
-
-    if [[ "$OCSB_DIR_REAL" != "$PROJECT_DIR"/* ]] && [[ "$OCSB_DIR_REAL" != "$PROJECT_DIR" ]]; then
-      echo "ocsb: workspace base directory escapes project root (symlink?)" >&2
-      exit 1
-    fi
-    if [[ "$WS_DIR_REAL" != "$PROJECT_DIR"/* ]]; then
-      echo "ocsb: workspace directory escapes project root" >&2
-      exit 1
-    fi
-    OCSB_DIR="$OCSB_DIR_REAL"
-    WS_DIR="$WS_DIR_REAL"
-
-    # =========================================================
     # Per-workspace lock and state (outside project tree — symlink-safe)
     # =========================================================
-    PROJECT_HASH="$(echo -n "$PROJECT_DIR" | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -c1-16)"
-    if [[ -n "''${OCSB_STATE_BASE_DIR:-}" ]]; then
-      if [[ "$OCSB_STATE_BASE_DIR" != /* ]]; then
-        echo "ocsb: OCSB_STATE_BASE_DIR must be absolute: $OCSB_STATE_BASE_DIR" >&2
-        exit 1
-      fi
-      STATE_BASE_DIR="$(${pkgs.coreutils}/bin/realpath -m "$OCSB_STATE_BASE_DIR")"
-    else
-      STATE_BASE_DIR="$HOME/.cache/ocsb/$PROJECT_HASH"
+    ${pkgs.coreutils}/bin/install -d -m 0700 "$OVERLAY_STATE_ACCESS_DIR"
+    if [[ ! -d "$OVERLAY_STATE_ACCESS_DIR" || -L "$OVERLAY_STATE_ACCESS_DIR" ||
+          "$(${pkgs.coreutils}/bin/stat -c %u -- "$OVERLAY_STATE_ACCESS_DIR")" != "$HOST_UID" ||
+          "$(${pkgs.coreutils}/bin/stat -c %a -- "$OVERLAY_STATE_ACCESS_DIR")" != 700 ]]; then
+      echo "ocsb: unsafe workspace state directory: $OVERLAY_STATE_DIR must be a current-UID mode 0700 directory" >&2
+      exit 1
     fi
-    OVERLAY_STATE_DIR="$STATE_BASE_DIR/$WORKSPACE_NAME"
-    ${pkgs.coreutils}/bin/mkdir -p "$OVERLAY_STATE_DIR"
 
-    LOCK_FILE="$OVERLAY_STATE_DIR/.lock"
-    exec 9>"$LOCK_FILE"
+    LOCK_FILE_ACCESS="$OVERLAY_STATE_ACCESS_DIR/.lock"
+    if [[ -L "$LOCK_FILE_ACCESS" ]]; then
+      echo "ocsb: unsafe workspace lock file: $OVERLAY_STATE_DIR/.lock" >&2
+      exit 1
+    fi
+    exec 9>"$LOCK_FILE_ACCESS"
     if ! ${pkgs.util-linux}/bin/flock -n 9; then
       echo "ocsb: workspace '$WORKSPACE_NAME' is locked by another process" >&2
       exit 1
     fi
 
-    ${pkgs.coreutils}/bin/mkdir -p "$OCSB_DIR"
+    read_workspace_state_marker() {
+      local _path="$1"
+      local _kind="$2"
+      local _display_path="''${3:-$1}"
+      local -a _lines=()
 
-    if [[ -d "$WS_DIR" ]] || [[ -f "$OVERLAY_STATE_DIR/.strategy" ]]; then
-      if [[ "$OVERWRITE" -eq 1 ]]; then
-        echo "ocsb: overwriting workspace '$WORKSPACE_NAME'..." >&2
-        # Use EXISTING strategy for cleanup (not the requested one)
-        CLEANUP_STRATEGY="$WORKSPACE_STRATEGY"
-        if [[ -f "$OVERLAY_STATE_DIR/.strategy" ]]; then
-          CLEANUP_STRATEGY="$(< "$OVERLAY_STATE_DIR/.strategy")"
+      [[ -e "$_path" ]] || return 1
+      if [[ -L "$_path" || ! -f "$_path" ]]; then
+        echo "ocsb: unsafe workspace $_kind marker: $_display_path" >&2
+        exit 1
+      fi
+      mapfile -t _lines < "$_path"
+      if [[ ''${#_lines[@]} -ne 1 ]]; then
+        echo "ocsb: malformed workspace $_kind marker: $_display_path" >&2
+        exit 1
+      fi
+      case "$_kind:''${_lines[0]}" in
+        strategy:overlayfs|strategy:btrfs|strategy:git-worktree|strategy:direct|backend:bubblewrap|backend:podman|backend:systemd-nspawn) ;;
+        *)
+          echo "ocsb: malformed workspace $_kind marker: $_display_path" >&2
+          exit 1
+          ;;
+      esac
+      printf '%s\n' "''${_lines[0]}"
+    }
+
+    EXISTING_STRATEGY=""
+    EXISTING_BACKEND=""
+    if [[ -e "$OVERLAY_STATE_ACCESS_DIR/.strategy" ]]; then
+      EXISTING_STRATEGY="$(read_workspace_state_marker "$OVERLAY_STATE_ACCESS_DIR/.strategy" strategy "$OVERLAY_STATE_DIR/.strategy")"
+    fi
+    if [[ -e "$OVERLAY_STATE_ACCESS_DIR/.backend" ]]; then
+      EXISTING_BACKEND="$(read_workspace_state_marker "$OVERLAY_STATE_ACCESS_DIR/.backend" backend "$OVERLAY_STATE_DIR/.backend")"
+    fi
+    REQUESTED_STRATEGY="$WORKSPACE_STRATEGY"
+    CLEANUP_STRATEGY=none
+
+    if [[ "$OVERWRITE" -eq 1 ]]; then
+      WORKSPACE_ACTION=overwrite
+      [[ -n "$EXISTING_STRATEGY" ]] && CLEANUP_STRATEGY="$EXISTING_STRATEGY"
+      echo "ocsb: overwriting workspace '$WORKSPACE_NAME'..." >&2
+    elif [[ "$CONTINUE" -eq 1 ]]; then
+      WORKSPACE_ACTION=continue
+      if [[ -z "$EXISTING_STRATEGY" || -z "$EXISTING_BACKEND" ]]; then
+        echo "ocsb: workspace '$WORKSPACE_NAME' has no complete strategy/backend state to continue" >&2
+        echo "  Use --overwrite to recreate it." >&2
+        exit 1
+      fi
+      CLEANUP_STRATEGY="$EXISTING_STRATEGY"
+      if [[ "$REQUESTED_STRATEGY" == auto ]]; then
+        if [[ "$EXISTING_STRATEGY" != btrfs && "$EXISTING_STRATEGY" != overlayfs ]]; then
+          echo "ocsb: workspace '$WORKSPACE_NAME' was created with strategy '$EXISTING_STRATEGY', cannot continue with 'auto'" >&2
+          echo "  Use --overwrite to recreate with a different strategy." >&2
+          exit 1
         fi
-        # Strategy-specific cleanup before removing directories
-        case "$CLEANUP_STRATEGY" in
-          git-worktree)
-            GWT_CLEANUP="$WS_DIR/worktree"
-            if [[ -d "$GWT_CLEANUP" ]]; then
-              ${pkgs.git}/bin/git -C "$PROJECT_DIR" worktree remove --force "$GWT_CLEANUP" 2>/dev/null || true
-            fi
-            ;;
-          btrfs)
-            BTRFS_CLEANUP="$WS_DIR/snapshot"
-            if [[ -d "$BTRFS_CLEANUP" ]]; then
-              ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$BTRFS_CLEANUP" 2>/dev/null || true
-            fi
-            ;;
-        esac
-        ${pkgs.coreutils}/bin/rm -rf "$WS_DIR"
-        if [[ -d "$OVERLAY_STATE_DIR/chroot" ]]; then
-          chmod_tree_dirs_writable "$OVERLAY_STATE_DIR/chroot"
-        fi
-        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/chroot" "$OVERLAY_STATE_DIR/.chroot-source"
-        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/overlay" "$OVERLAY_STATE_DIR/upper" "$OVERLAY_STATE_DIR/work"
-        # Clean per-directory overlay and snapshot state. Keep the root-level
-        # ovl-*/snap-* loops as legacy cleanup for workspaces created before
-        # overlay/mounts and snapshots became separate state directories.
-        for _d in "$OVERLAY_STATE_DIR"/ovl-*; do
-          [[ -d "$_d" ]] && ${pkgs.coreutils}/bin/rm -rf "$_d"
-        done
-        for _d in "$OVERLAY_STATE_DIR"/snap-*; do
-          if [[ -d "$_d" ]]; then
-            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_d" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_d"
-          fi
-        done
-        for _d in "$OVERLAY_STATE_DIR"/snapshots/snap-*; do
-          if [[ -d "$_d" ]]; then
-            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_d" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_d"
-          fi
-        done
-        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_DIR/snapshots"
-      elif [[ "$CONTINUE" -eq 1 ]]; then
-        # Verify strategy matches what workspace was created with
-        if [[ -f "$OVERLAY_STATE_DIR/.strategy" ]]; then
-          EXISTING_STRATEGY="$(< "$OVERLAY_STATE_DIR/.strategy")"
-          if [[ "$EXISTING_STRATEGY" != "$WORKSPACE_STRATEGY" ]]; then
-            echo "ocsb: workspace '$WORKSPACE_NAME' was created with strategy '$EXISTING_STRATEGY', cannot continue with '$WORKSPACE_STRATEGY'" >&2
-            echo "  Use --overwrite to recreate with a different strategy." >&2
-            exit 1
-          fi
-        fi
-        if [[ -f "$OVERLAY_STATE_DIR/.backend" ]]; then
-          EXISTING_BACKEND="$(< "$OVERLAY_STATE_DIR/.backend")"
-          if [[ "$EXISTING_BACKEND" != "$BACKEND_TYPE" ]]; then
-            echo "ocsb: workspace '$WORKSPACE_NAME' was created with backend '$EXISTING_BACKEND', cannot continue with '$BACKEND_TYPE'" >&2
-            echo "  Use --overwrite to recreate with a different backend." >&2
-            exit 1
-          fi
-        fi
-        echo "ocsb: continuing workspace '$WORKSPACE_NAME'..." >&2
-      else
+      elif [[ "$EXISTING_STRATEGY" != "$REQUESTED_STRATEGY" ]]; then
+        echo "ocsb: workspace '$WORKSPACE_NAME' was created with strategy '$EXISTING_STRATEGY', cannot continue with '$REQUESTED_STRATEGY'" >&2
+        echo "  Use --overwrite to recreate with a different strategy." >&2
+        exit 1
+      fi
+      if [[ "$EXISTING_BACKEND" != "$BACKEND_TYPE" ]]; then
+        echo "ocsb: workspace '$WORKSPACE_NAME' was created with backend '$EXISTING_BACKEND', cannot continue with '$BACKEND_TYPE'" >&2
+        echo "  Use --overwrite to recreate with a different backend." >&2
+        exit 1
+      fi
+      echo "ocsb: continuing workspace '$WORKSPACE_NAME'..." >&2
+    else
+      WORKSPACE_ACTION=create
+      if [[ -n "$EXISTING_STRATEGY" || -n "$EXISTING_BACKEND" ]]; then
         echo "ocsb: workspace '$WORKSPACE_NAME' already exists." >&2
         echo "  Use --continue to resume, or --overwrite to start fresh." >&2
         exit 1
       fi
     fi
 
-    ${pkgs.coreutils}/bin/mkdir -p "$WS_DIR"
-    echo "$WORKSPACE_STRATEGY" > "$OVERLAY_STATE_DIR/.strategy"
-    echo "$BACKEND_TYPE" > "$OVERLAY_STATE_DIR/.backend"
+    if [[ -n "$INHERITED_PROJECT_FD" ]]; then
+      PROJECT_DEV="$INHERITED_PROJECT_DEV"
+      PROJECT_INO="$INHERITED_PROJECT_INO"
+    else
+      PROJECT_IDENTITY="$(LC_ALL=C ${pkgs.coreutils}/bin/stat -c $'%d\t%i' -- "$PROJECT_DIR")"
+      IFS=$'\t' read -r PROJECT_DEV PROJECT_INO <<< "$PROJECT_IDENTITY"
+    fi
+    if [[ ! "$PROJECT_DEV" =~ ^[0-9]+$ || ! "$PROJECT_INO" =~ ^[0-9]+$ ||
+          "$PROJECT_DEV" == 0 || "$PROJECT_INO" == 0 ]]; then
+      echo "ocsb: cannot capture project identity: $PROJECT_DIR" >&2
+      exit 1
+    fi
+    WORKSPACE_NONCE="$(${pkgs.coreutils}/bin/head -c 32 /dev/urandom | ${pkgs.coreutils}/bin/sha256sum | ${pkgs.coreutils}/bin/cut -d ' ' -f 1)"
+    [[ "$WORKSPACE_NONCE" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "ocsb: cannot generate workspace mutation nonce" >&2
+      exit 1
+    }
+    WORKSPACE_RECEIPT="$OVERLAY_STATE_DIR/.workspace-receipt-$WORKSPACE_NONCE"
+    WORKSPACE_RECEIPT_ACCESS="$OVERLAY_STATE_ACCESS_DIR/.workspace-receipt-$WORKSPACE_NONCE"
+    printf -v WORKSPACE_MUTATION_SPEC '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+      v1 "$WORKSPACE_NONCE" "$PROJECT_DIR" "$PROJECT_DEV" "$PROJECT_INO" \
+      "$OCSB_BASE_DIR" "$WORKSPACE_NAME" "$WORKSPACE_ACTION" "$REQUESTED_STRATEGY" \
+      "$CLEANUP_STRATEGY" "$BACKEND_TYPE" "$OVERLAY_STATE_DIR"
+    WORKSPACE_MUTATION_ARGS=(
+      --mutation-only
+      "''${INHERITED_FD_ARGS[@]}"
+      --mutation-spec "$WORKSPACE_MUTATION_SPEC"
+      --workspace-receipt "$WORKSPACE_RECEIPT"
+      --git-bin ${pkgs.git}/bin/git
+    )
+    ${lib.optionalString (mountAnchorMutationTestHookArgs != [ ]) ''
+    WORKSPACE_MUTATION_ARGS+=(${lib.escapeShellArgs mountAnchorMutationTestHookArgs})
+    ''}
+    ${mountAnchor}/bin/ocsb-mount-anchor "''${WORKSPACE_MUTATION_ARGS[@]}"
+
+    WORKSPACE_RECEIPT_LINES=()
+    mapfile -t WORKSPACE_RECEIPT_LINES < "$WORKSPACE_RECEIPT_ACCESS"
+    if [[ ''${#WORKSPACE_RECEIPT_LINES[@]} -ne 1 ]]; then
+      echo "ocsb: workspace mutation helper produced a malformed receipt" >&2
+      exit 1
+    fi
+    IFS=$'\t' read -r -a WORKSPACE_RECEIPT_FIELDS <<< "''${WORKSPACE_RECEIPT_LINES[0]}"
+    if [[ ''${#WORKSPACE_RECEIPT_FIELDS[@]} -ne 17 ||
+          "''${WORKSPACE_RECEIPT_FIELDS[0]}" != v1 ||
+          "''${WORKSPACE_RECEIPT_FIELDS[1]}" != "$WORKSPACE_NONCE" ||
+          "''${WORKSPACE_RECEIPT_FIELDS[2]}" != "$PROJECT_DIR" ||
+          "''${WORKSPACE_RECEIPT_FIELDS[3]}" != "$OCSB_BASE_DIR" ||
+          "''${WORKSPACE_RECEIPT_FIELDS[4]}" != "$WORKSPACE_NAME" ||
+          "''${WORKSPACE_RECEIPT_FIELDS[12]}" != "$BACKEND_TYPE" ]]; then
+      echo "ocsb: workspace mutation receipt does not match the request" >&2
+      exit 1
+    fi
+    for _identity_index in 5 6 7 8 9 10 14 15; do
+      [[ "''${WORKSPACE_RECEIPT_FIELDS[$_identity_index]}" =~ ^[0-9]+$ ]] || {
+        echo "ocsb: workspace mutation receipt has an invalid identity" >&2
+        exit 1
+      }
+    done
+    WORKSPACE_STRATEGY="''${WORKSPACE_RECEIPT_FIELDS[11]}"
+    case "$WORKSPACE_STRATEGY" in
+      direct|overlayfs)
+        [[ "''${WORKSPACE_RECEIPT_FIELDS[13]}" == none &&
+          "''${WORKSPACE_RECEIPT_FIELDS[14]}" == 0 &&
+          "''${WORKSPACE_RECEIPT_FIELDS[15]}" == 0 &&
+          "''${WORKSPACE_RECEIPT_FIELDS[16]}" == none ]] || {
+          echo "ocsb: workspace mutation receipt has an invalid direct/overlay identity" >&2
+          exit 1
+        }
+        WORKSPACE_RECEIPT_SOURCE_PATH="$PROJECT_DIR"
+        WORKSPACE_RECEIPT_SOURCE_DEV="''${WORKSPACE_RECEIPT_FIELDS[5]}"
+        WORKSPACE_RECEIPT_SOURCE_INO="''${WORKSPACE_RECEIPT_FIELDS[6]}"
+        ;;
+      btrfs)
+        [[ "''${WORKSPACE_RECEIPT_FIELDS[13]}" == snapshot &&
+          "''${WORKSPACE_RECEIPT_FIELDS[14]}" != 0 &&
+          "''${WORKSPACE_RECEIPT_FIELDS[15]}" != 0 &&
+          "''${WORKSPACE_RECEIPT_FIELDS[16]}" == btrfs-subvolume ]] || {
+          echo "ocsb: workspace mutation receipt has an invalid btrfs identity" >&2
+          exit 1
+        }
+        WORKSPACE_RECEIPT_SOURCE_PATH="$WS_DIR/snapshot"
+        WORKSPACE_RECEIPT_SOURCE_DEV="''${WORKSPACE_RECEIPT_FIELDS[14]}"
+        WORKSPACE_RECEIPT_SOURCE_INO="''${WORKSPACE_RECEIPT_FIELDS[15]}"
+        ;;
+      git-worktree)
+        [[ "''${WORKSPACE_RECEIPT_FIELDS[13]}" == worktree &&
+          "''${WORKSPACE_RECEIPT_FIELDS[14]}" != 0 &&
+          "''${WORKSPACE_RECEIPT_FIELDS[15]}" != 0 &&
+          "''${WORKSPACE_RECEIPT_FIELDS[16]}" == git-worktree ]] || {
+          echo "ocsb: workspace mutation receipt has an invalid git worktree identity" >&2
+          exit 1
+        }
+        WORKSPACE_RECEIPT_SOURCE_PATH="$WS_DIR/worktree"
+        WORKSPACE_RECEIPT_SOURCE_DEV="''${WORKSPACE_RECEIPT_FIELDS[14]}"
+        WORKSPACE_RECEIPT_SOURCE_INO="''${WORKSPACE_RECEIPT_FIELDS[15]}"
+        ;;
+      *)
+        echo "ocsb: workspace mutation receipt has an invalid resolved strategy" >&2
+        exit 1
+        ;;
+    esac
+
+    if [[ "$BACKEND_TYPE" != "bubblewrap" && "$WORKSPACE_STRATEGY" == "overlayfs" ]]; then
+      echo "ocsb: backend '$BACKEND_TYPE' does not support workspace.strategy=overlayfs in v1; use direct, btrfs, git-worktree, or bubblewrap" >&2
+      exit 1
+    fi
+
+    # External state is cleaned only after the project mutation succeeds and
+    # while FD 9 still holds the per-workspace lock.
+    if [[ "$WORKSPACE_ACTION" == overwrite ]]; then
+        if [[ -d "$OVERLAY_STATE_ACCESS_DIR/chroot" ]]; then
+          chmod_tree_dirs_writable "$OVERLAY_STATE_ACCESS_DIR/chroot"
+        fi
+        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_ACCESS_DIR/chroot" "$OVERLAY_STATE_ACCESS_DIR/.chroot-source"
+        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_ACCESS_DIR/overlay" "$OVERLAY_STATE_ACCESS_DIR/upper" "$OVERLAY_STATE_ACCESS_DIR/work"
+        # Clean per-directory overlay and snapshot state. Keep the root-level
+        # ovl-*/snap-* loops as legacy cleanup for workspaces created before
+        # overlay/mounts and snapshots became separate state directories.
+        for _d in "$OVERLAY_STATE_ACCESS_DIR"/ovl-*; do
+          [[ -d "$_d" ]] && ${pkgs.coreutils}/bin/rm -rf "$_d"
+        done
+        for _d in "$OVERLAY_STATE_ACCESS_DIR"/snap-*; do
+          if [[ -d "$_d" ]]; then
+            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_d" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_d"
+          fi
+        done
+        for _d in "$OVERLAY_STATE_ACCESS_DIR"/snapshots/snap-*; do
+          if [[ -d "$_d" ]]; then
+            ${pkgs.btrfs-progs}/bin/btrfs subvolume delete "$_d" 2>/dev/null || ${pkgs.coreutils}/bin/rm -rf "$_d"
+          fi
+        done
+        ${pkgs.coreutils}/bin/rm -rf "$OVERLAY_STATE_ACCESS_DIR/snapshots"
+    fi
+
+    printf '%s\n' "$WORKSPACE_STRATEGY" > "$OVERLAY_STATE_ACCESS_DIR/.strategy.tmp.$$"
+    ${pkgs.coreutils}/bin/mv -f -T -- "$OVERLAY_STATE_ACCESS_DIR/.strategy.tmp.$$" "$OVERLAY_STATE_ACCESS_DIR/.strategy"
+    printf '%s\n' "$BACKEND_TYPE" > "$OVERLAY_STATE_ACCESS_DIR/.backend.tmp.$$"
+    ${pkgs.coreutils}/bin/mv -f -T -- "$OVERLAY_STATE_ACCESS_DIR/.backend.tmp.$$" "$OVERLAY_STATE_ACCESS_DIR/.backend"
 
     # =========================================================
     # Strategy-specific flags

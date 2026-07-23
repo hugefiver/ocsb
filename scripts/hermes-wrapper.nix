@@ -1,5 +1,8 @@
 { pkgs, mkHermesAgentSandboxBase }:
 
+let
+  runtimeProcess = import ../lib/runtime-process.nix { inherit pkgs; };
+in
 pkgs.writeShellScriptBin "ocsb-hermes" ''
   set -euo pipefail
 
@@ -13,6 +16,9 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
   NO_GATEWAY=0
   GATEWAY_MODE=0
   REPLACE_MODE=0
+  HERMES_WORKSPACE_NAME="hermes-agent"
+
+  ${runtimeProcess.shellHelpers}
 
   usage() {
     cat <<USAGE_EOF
@@ -208,6 +214,84 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
     done < <(${pkgs.coreutils}/bin/env | ${pkgs.coreutils}/bin/cut -d= -f1 | ${pkgs.coreutils}/bin/sort -u)
   }
 
+  refuse_replace() {
+    echo "ocsb-hermes: refusing --replace: $*" >&2
+    return 1
+  }
+
+  replace_running_sandbox() {
+    local _record="$1"
+    local _instance="$2"
+    local _pid _start _record_line _current_start _current_uid _current_comm _current_exe _i
+
+    if ! ocsb_validate_process_record "$_record" "$_instance"; then
+      refuse_replace "invalid process record: $_record"
+      return 1
+    fi
+    _pid="$OCSB_RECORD_PID"
+    _start="$OCSB_RECORD_START"
+    _record_line="$OCSB_RECORD_LINE"
+
+    _current_uid="$(${pkgs.coreutils}/bin/stat -c %u -- "/proc/$_pid" 2>/dev/null)" || {
+      refuse_replace "cannot determine owner for recorded PID $_pid"
+      return 1
+    }
+    if [[ "$_current_uid" != "$(${pkgs.coreutils}/bin/id -u)" ]]; then
+      refuse_replace "recorded PID $_pid is not owned by the current user"
+      return 1
+    fi
+    if ! IFS= read -r _current_comm < "/proc/$_pid/comm"; then
+      refuse_replace "cannot read command name for recorded PID $_pid"
+      return 1
+    fi
+    if [[ "$_current_comm" != "bwrap" ]]; then
+      refuse_replace "recorded PID $_pid is not a bwrap process"
+      return 1
+    fi
+    _current_exe="$(${pkgs.coreutils}/bin/readlink -f -- "/proc/$_pid/exe" 2>/dev/null)" || {
+      refuse_replace "cannot resolve executable for recorded PID $_pid"
+      return 1
+    }
+    if [[ "$_current_exe" != "${pkgs.bubblewrap}/bin/bwrap" ]]; then
+      refuse_replace "recorded PID $_pid is not the expected bwrap executable"
+      return 1
+    fi
+    _current_start="$(ocsb_proc_start_time "$_pid")" || {
+      refuse_replace "cannot revalidate start time for recorded PID $_pid"
+      return 1
+    }
+    if [[ "$_current_start" != "$_start" ]]; then
+      refuse_replace "recorded PID $_pid start time changed before signalling"
+      return 1
+    fi
+    if ! kill "$_pid"; then
+      refuse_replace "failed to signal recorded PID $_pid"
+      return 1
+    fi
+
+    for ((_i=0; _i<50; _i++)); do
+      if ! kill -0 "$_pid" 2>/dev/null; then
+        if ! ocsb_remove_matching_process_record "$_record" "$_record_line"; then
+          refuse_replace "record changed while waiting for PID $_pid to exit"
+          return 1
+        fi
+        return 0
+      fi
+      _current_start="$(ocsb_proc_start_time "$_pid")" || {
+        refuse_replace "cannot revalidate start time for recorded PID $_pid while waiting"
+        return 1
+      }
+      if [[ "$_current_start" != "$_start" ]]; then
+        refuse_replace "recorded PID $_pid start time changed while waiting"
+        return 1
+      fi
+      ${pkgs.coreutils}/bin/sleep 0.1
+    done
+
+    refuse_replace "recorded PID $_pid did not exit within five seconds"
+    return 1
+  }
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -h|--help)
@@ -216,6 +300,7 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
         ;;
       -w|--workspace)
         [[ $# -ge 2 ]] || { echo "ocsb-hermes: $1 requires a value" >&2; exit 1; }
+        HERMES_WORKSPACE_NAME="$2"
         FILTERED_ARGS+=("$1" "$2")
         shift 2
         ;;
@@ -302,6 +387,12 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
     esac
   done
 
+  if [[ -n "$API_KEYS_ENV_FILE_HOST" && ''${#API_KEYS_ENV_NAMES[@]} -gt 0 ]]; then
+    _API_KEYS_ENV_NAMES_LIST="$(IFS=,; printf '%s' "''${API_KEYS_ENV_NAMES[*]}")"
+    echo "ocsb-hermes: --env secret names cannot be combined with --api-keys-env-file: $_API_KEYS_ENV_NAMES_LIST; merge $_API_KEYS_ENV_NAMES_LIST into --api-keys-env-file" >&2
+    exit 2
+  fi
+
   if [[ -z "$PERSIST_DIR" ]]; then
     if [[ -n "''${OCSB_HERMES_AGENT_PERSIST_DIR:-}" ]]; then
       PERSIST_DIR="$OCSB_HERMES_AGENT_PERSIST_DIR"
@@ -309,6 +400,7 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
       PERSIST_DIR="$HOME/.cache/ocsb/hermes-agent"
     fi
   fi
+  PERSIST_DIR="$(${pkgs.coreutils}/bin/realpath -m "$PERSIST_DIR")"
 
   # --- gateway / replace logic ---
   if [[ "$GATEWAY_MODE" -eq 1 ]]; then
@@ -325,20 +417,16 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
       echo "ocsb-hermes: --replace requires --gateway" >&2
       exit 1
     fi
-    # Kill the running sandbox via pidfile, then restart with --continue.
-    _PIDFILE="''${XDG_RUNTIME_DIR:-/tmp}/ocsb/hermes-agent.pid"
-    if [[ -f "$_PIDFILE" ]]; then
-      _OLD_PID="$(${pkgs.coreutils}/bin/cat "$_PIDFILE")"
-      _OLD_PID="''${_OLD_PID%% *}"
-      if [[ -n "$_OLD_PID" ]] && kill -0 "$_OLD_PID" 2>/dev/null; then
-        echo "ocsb-hermes: --replace: killing sandbox pid=$_OLD_PID" >&2
-        kill "$_OLD_PID"
-        for ((_i=0; _i<50; _i++)); do
-          kill -0 "$_OLD_PID" 2>/dev/null || break
-          ${pkgs.coreutils}/bin/sleep 0.1
-        done
-      fi
-    fi
+    HERMES_STATE_DIR="$(${pkgs.coreutils}/bin/realpath -m "$PERSIST_DIR/state/$HERMES_WORKSPACE_NAME")"
+    HERMES_INSTANCE="$(ocsb_instance_digest "sandbox:hermes-agent" "$HERMES_STATE_DIR")" || {
+      refuse_replace "cannot derive sandbox identity"
+      exit 1
+    }
+    HERMES_RECORD="$(ocsb_process_record_path "sandbox:hermes-agent" "$HERMES_STATE_DIR")" || {
+      refuse_replace "cannot locate sandbox process record"
+      exit 1
+    }
+    replace_running_sandbox "$HERMES_RECORD" "$HERMES_INSTANCE" || exit 1
     FILTERED_ARGS=(--continue "''${FILTERED_ARGS[@]}")
     HAS_CONTINUE_OR_OVERWRITE=1
   fi
@@ -348,8 +436,6 @@ pkgs.writeShellScriptBin "ocsb-hermes" ''
   if [[ "$HAS_CONTINUE_OR_OVERWRITE" -eq 0 ]]; then
     FILTERED_ARGS=(--continue "''${FILTERED_ARGS[@]}")
   fi
-
-  PERSIST_DIR="$(${pkgs.coreutils}/bin/realpath -m "$PERSIST_DIR")"
 
   ${pkgs.coreutils}/bin/mkdir -p \
     "$PERSIST_DIR/home" \

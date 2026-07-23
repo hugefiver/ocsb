@@ -35,8 +35,13 @@ assert "OCSB_NETWORK is 'filtered'" [ "${OCSB_NETWORK:-}" = "filtered" ]
 echo ""
 
 echo "--- DNS + public internet access ---"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 https://httpbin.org/get 2>/dev/null) || true
-assert "curl public HTTPS works — implies DNS resolution (got $HTTP_CODE)" [ "$HTTP_CODE" != "000" ] && [ -n "$HTTP_CODE" ]
+set +e
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 10 https://httpbin.org/get 2>/dev/null)
+HTTP_EXIT=$?
+set -e
+assert "public HTTPS command exits zero" [ "$HTTP_EXIT" -eq 0 ]
+assert "curl public HTTPS returns an HTTP code" [ -n "$HTTP_CODE" ]
+assert "curl public HTTPS works — implies DNS resolution (got $HTTP_CODE)" [ "$HTTP_CODE" != "000" ]
 echo ""
 
 echo "--- private range blocking ---"
@@ -54,12 +59,15 @@ assert_not "169.254.1.1 unreachable" \
 echo ""
 
 echo "--- iptables rules ---"
-IPTABLES_OUTPUT=$(iptables -L OUTPUT -n 2>/dev/null || echo "UNAVAILABLE")
-if [ "$IPTABLES_OUTPUT" != "UNAVAILABLE" ]; then
-  assert "iptables has ACCEPT for 10.0.2.0/24" echo "$IPTABLES_OUTPUT" | grep -q "10.0.2.0/24"
-  assert "iptables has DROP for 10.0.0.0/8" echo "$IPTABLES_OUTPUT" | grep -q "10.0.0.0/8"
+set +e
+IPTABLES_OUTPUT=$(iptables -L OUTPUT -n 2>/dev/null)
+IPTABLES_EXIT=$?
+set -e
+if [ "$IPTABLES_EXIT" -eq 0 ]; then
+  assert "iptables has ACCEPT for 10.0.2.0/24" grep -q "10.0.2.0/24" <<< "$IPTABLES_OUTPUT"
+  assert "iptables has DROP for 10.0.0.0/8" grep -q "10.0.0.0/8" <<< "$IPTABLES_OUTPUT"
 else
-  echo "  SKIP: iptables not available (caps dropped or kernel restriction)"
+  echo "  SKIP: iptables not available (exit $IPTABLES_EXIT; caps dropped or kernel restriction)"
 fi
 echo ""
 
