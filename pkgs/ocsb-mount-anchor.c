@@ -2308,8 +2308,9 @@ out:
   return result;
 }
 
-static int establish_bubblewrap_mount_namespace(const char *private_mount_target) {
-  if (unshare(CLONE_NEWNS) != 0) {
+static int establish_bubblewrap_mount_namespace(const char *private_mount_target,
+                                                bool namespace_already_unshared) {
+  if (!namespace_already_unshared && unshare(CLONE_NEWNS) != 0) {
     return bubblewrap_failure_errno("unshare(CLONE_NEWNS)");
   }
   if (mount(NULL, private_mount_target, NULL, MS_REC | MS_PRIVATE, NULL) != 0) {
@@ -2366,7 +2367,7 @@ static int translate_inherited_roots_into_bubblewrap_namespace(
     terminate_inherited_bridge("old filesystem root");
   }
   bridge_cwd_is_old_root = true;
-  if (establish_bubblewrap_mount_namespace(".") != 0) {
+  if (establish_bubblewrap_mount_namespace(".", false) != 0) {
     goto out;
   }
   translated_parent_fd = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -2465,8 +2466,11 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
   int uid_map_length;
   int gid_map_length;
 
-  if (unshare(CLONE_NEWUSER) != 0) {
-    return bubblewrap_failure_errno("unshare(CLONE_NEWUSER)");
+  if (unshare(CLONE_NEWUSER |
+              (configuration->inherited_root_count == 0U ? CLONE_NEWNS : 0)) != 0) {
+    return configuration->inherited_root_count == 0U
+               ? bubblewrap_failure_errno("unshare(CLONE_NEWUSER|CLONE_NEWNS)")
+               : bubblewrap_failure_errno("unshare(CLONE_NEWUSER)");
   }
   if (write_proc_file("/proc/self/setgroups", "deny\n") != 0 && errno != ENOENT &&
       errno != EACCES && errno != EPERM) {
@@ -2500,7 +2504,7 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
   if (configuration->inherited_root_count != 0U) {
     return translate_inherited_roots_into_bubblewrap_namespace(configuration, original_cwd_fd);
   }
-  return establish_bubblewrap_mount_namespace("/");
+  return establish_bubblewrap_mount_namespace("/", configuration->inherited_root_count == 0U);
 }
 
 static int has_effective_cap_sys_admin(void) {
