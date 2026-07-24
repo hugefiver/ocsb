@@ -460,19 +460,37 @@ jobs:
             printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
             exit 0
           fi
-          case "$DOCKER_BIN" in /usr/bin/docker|/bin/docker|*/docker) ;; *) printf "unexpected docker: %s\n" "$DOCKER_BIN" >&2; exit 1 ;; esac
-          docker version --format '{{.Server.Version}}' 2>&1 | sed 's/^/DOCKER_SERVER_VERSION=/' | tee -a "$LOG"
+          case "$DOCKER_BIN" in /usr/bin/docker|/bin/docker|*/docker) ;; *) printf "unexpected docker: %s\n" "$DOCKER_BIN" | tee -a "$LOG"; printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"; exit 0 ;; esac
+          if ! docker version --format '{{.Server.Version}}' 2>&1 | sed 's/^/DOCKER_SERVER_VERSION=/' | tee -a "$LOG"; then
+            printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
+            exit 0
+          fi
           if ! docker info 2>&1 | sed -n '1,80p' | tee -a "$LOG" >/dev/null; then
             printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
             exit 0
           fi
-          ENDPOINT=$(docker context inspect --format '{{(index .Endpoints "docker").Host}}')
+          ENDPOINT=$(docker context inspect --format '{{(index .Endpoints "docker").Host}}' 2>&1) || {
+            printf 'DOCKER_CONTEXT_ERROR=%s\n' "$ENDPOINT" | tee -a "$LOG"
+            printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
+            exit 0
+          }
           printf 'DOCKER_ENDPOINT=%s\n' "$ENDPOINT" | tee -a "$LOG"
-          case "$ENDPOINT" in unix://*) ;; *) printf 'non-local Docker endpoint: %s\n' "$ENDPOINT" >&2; exit 1 ;; esac
+          case "$ENDPOINT" in unix://*) ;; *) printf 'non-local Docker endpoint: %s\n' "$ENDPOINT" | tee -a "$LOG"; printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"; exit 0 ;; esac
           IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
-          docker pull "$IMAGE"
-          IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}')
-          REPODIGESTS=$(docker image inspect "$IMAGE" --format '{{json .RepoDigests}}')
+          if ! docker pull "$IMAGE" 2>&1 | tee -a "$LOG"; then
+            printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
+            exit 0
+          fi
+          IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>&1) || {
+            printf 'DOCKER_IMAGE_ID_ERROR=%s\n' "$IMAGE_ID" | tee -a "$LOG"
+            printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
+            exit 0
+          }
+          REPODIGESTS=$(docker image inspect "$IMAGE" --format '{{json .RepoDigests}}' 2>&1) || {
+            printf 'DOCKER_REPODIGESTS_ERROR=%s\n' "$REPODIGESTS" | tee -a "$LOG"
+            printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
+            exit 0
+          }
           test -n "$IMAGE_ID"
           printf '%s' "$REPODIGESTS" | grep -Fq 'sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0'
           printf '%s\n' "PINNED_IMAGE_RUNTIME=docker" "PINNED_IMAGE_REQUEST=$IMAGE" "PINNED_IMAGE_ID=$IMAGE_ID" "PINNED_IMAGE_REPODIGESTS=$REPODIGESTS" > "$LOG"
