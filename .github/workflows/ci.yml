@@ -181,6 +181,10 @@ jobs:
       - name: Backend runtime suite
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           bash tests/test_backend.sh .
 
       - name: Backend process record fixture
