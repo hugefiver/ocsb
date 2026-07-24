@@ -5925,7 +5925,8 @@ int main(int argc, char **argv) {
     (void)fail_errno("mount anchoring unavailable: cannot preserve current working directory", NULL);
     goto cleanup;
   }
-  if (setup_namespace(&configuration, &original_cwd_fd) != 0) {
+  if (!configuration.bubblewrap_fd_sources &&
+      setup_namespace(&configuration, &original_cwd_fd) != 0) {
     goto cleanup;
   }
   if (close(runtime_root_fd) != 0) {
