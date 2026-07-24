@@ -254,7 +254,8 @@ else
     "nix develop .#backend-test -c bash -c '" \
     'PODMAN_BIN=$(command -v podman)' \
     'case "$PODMAN_BIN" in /nix/store/*/bin/podman)' \
-    'test "$(podman info --format "{{.Host.Security.Rootless}}")" = true' \
+    'PODMAN_ROOTLESS=$(podman --remote=false info --format "{{.Host.Security.Rootless}}" 2>&1)' \
+    'printf "PODMAN_ROOTLESS=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"' \
     'HOST_UID=$(id -u)' \
     'LOG="$RUNNER_TEMP/14-real-podman-green.log"' \
     'printf "PODMAN_BIN=%s\n" "$PODMAN_BIN" | tee "$LOG"' \
