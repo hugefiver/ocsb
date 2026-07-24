@@ -190,7 +190,16 @@ jobs:
       - name: Backend process record fixture
         run: |
           set -euo pipefail
-          bash tests/test_backend.sh . --case process-record-schema
+          LOG="$RUNNER_TEMP/backend-process-record.log"
+          set +e
+          bash tests/test_backend.sh . --case process-record-schema 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=Backend process record fixture compact::%s\n' "$msg"
+            exit "$rc"
+          fi
 
       - name: Backend container rootfs fixture
         run: |
