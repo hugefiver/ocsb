@@ -208,6 +208,10 @@ jobs:
       - name: Backend container rootfs fixture
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           LOG="$RUNNER_TEMP/backend-container-rootfs.log"
           set +e
           bash tests/test_backend.sh . --case container-rootfs-persistence 2>&1 | tee "$LOG"
@@ -222,6 +226,10 @@ jobs:
       - name: Backend generic daemon fixture
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           bash tests/test_backend.sh . --case generic-daemon-pip
 
       - name: Binpath runtime suite
@@ -279,8 +287,12 @@ jobs:
           nix eval --impure --json .#packages.aarch64-linux --apply builtins.attrNames > "$AARCH_JSON"
           nix eval --impure --json .#packages.x86_64-linux --apply builtins.attrNames > "$X86_JSON"
           bash tests/test_arch_outputs.sh "$AARCH_JSON" "$X86_JSON"
-          FAILURE_DELEGATE=$(bash tests/test_failure_propagation.sh --prepare "$RUNNER_TEMP/failure-fixture" "$DEFAULT_OUT/bin/ocsb")
-          env -u XDG_RUNTIME_DIR bash tests/test_failure_propagation.sh --case strategy-create "$FAILURE_DELEGATE"
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" = 1 ]; then
+            FAILURE_DELEGATE=$(bash tests/test_failure_propagation.sh --prepare "$RUNNER_TEMP/failure-fixture" "$DEFAULT_OUT/bin/ocsb")
+            env -u XDG_RUNTIME_DIR bash tests/test_failure_propagation.sh --case strategy-create "$FAILURE_DELEGATE"
+          else
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+          fi
 
       - name: Run capability-based network suite
         run: |
