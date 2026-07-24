@@ -320,9 +320,10 @@ jobs:
           set -euo pipefail
           nix develop .#backend-test -c bash -c '
             set -euo pipefail
+            LOG="$RUNNER_TEMP/14-real-podman-green.log"
+            trap '\''rc=$?; printf "podman-anchor failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"'\'' ERR
             PODMAN_BIN=$(command -v podman)
             case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
-            LOG="$RUNNER_TEMP/14-real-podman-green.log"
             printf "PODMAN_BIN=%s\n" "$PODMAN_BIN" | tee "$LOG"
             test "$(podman info --format "{{.Host.Security.Rootless}}")" = true
             HOST_UID=$(id -u)
@@ -334,6 +335,11 @@ jobs:
             grep -Fq "PASS[GREEN-real-rootless-podman-anchor]: uid=$HOST_UID source=original" \
               "$LOG"
           '
+          if ! grep -Fq 'PASS[GREEN-real-rootless-podman-anchor]' "$RUNNER_TEMP/14-real-podman-green.log"; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$RUNNER_TEMP/14-real-podman-green.log")
+            printf '::error title=Podman anchor compact::%s\n' "$msg"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -355,10 +361,11 @@ jobs:
           nix develop .#backend-test -c bash -c '
             set -euo pipefail
             IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
+            LOG="$RUNNER_TEMP/19-native-podman-sidecar-green.log"
+            trap '\''rc=$?; printf "native podman sidecar failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"'\'' ERR
             PODMAN_BIN=$(command -v podman)
             case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
             test "$(podman --remote=false info --format "{{.Host.Security.Rootless}}")" = true
-            LOG="$RUNNER_TEMP/19-native-podman-sidecar-green.log"
             podman --remote=false pull "$IMAGE"
             IMAGE_ID=$(podman --remote=false image inspect "$IMAGE" --format "{{.Id}}")
             REPODIGESTS=$(podman --remote=false image inspect "$IMAGE" --format "{{json .RepoDigests}}")
@@ -370,6 +377,11 @@ jobs:
             grep -Fq "PASS[GREEN-sidecar-native-podman-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env" "$LOG"
             grep -Fq "CLEANUP PASS: native podman sidecar container processes persist cidfiles fifos outlinks mounts removed" "$LOG"
           '
+          if ! grep -Fq 'PASS[GREEN-sidecar-native-podman-lifecycle]' "$RUNNER_TEMP/19-native-podman-sidecar-green.log"; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$RUNNER_TEMP/19-native-podman-sidecar-green.log")
+            printf '::error title=Native Podman sidecar compact::%s\n' "$msg"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -388,13 +400,14 @@ jobs:
       - name: Verify native Docker sidecar lifecycle
         run: |
           set -euo pipefail
+          LOG="$RUNNER_TEMP/19-native-docker-sidecar-green.log"
+          trap 'rc=$?; printf "native docker sidecar failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"' ERR
           DOCKER_BIN=$(command -v docker)
           case "$DOCKER_BIN" in /usr/bin/docker|/bin/docker|*/docker) ;; *) printf "unexpected docker: %s\n" "$DOCKER_BIN" >&2; exit 1 ;; esac
           docker info >/dev/null
           ENDPOINT=$(docker context inspect --format '{{(index .Endpoints "docker").Host}}')
           case "$ENDPOINT" in unix://*) ;; *) printf 'non-local Docker endpoint: %s\n' "$ENDPOINT" >&2; exit 1 ;; esac
           IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
-          LOG="$RUNNER_TEMP/19-native-docker-sidecar-green.log"
           docker pull "$IMAGE"
           IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}')
           REPODIGESTS=$(docker image inspect "$IMAGE" --format '{{json .RepoDigests}}')
@@ -405,6 +418,11 @@ jobs:
           OCSB_NATIVE_DOCKER_REQUIRED=1 bash tests/test_ironclaw.sh --case native-sidecar-lifecycle docker "$WRAPPER" | tee -a "$LOG"
           grep -Fq 'PASS[GREEN-sidecar-native-docker-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env' "$LOG"
           grep -Fq 'CLEANUP PASS: native docker sidecar container processes persist cidfiles fifos outlinks mounts removed' "$LOG"
+          if ! grep -Fq 'PASS[GREEN-sidecar-native-docker-lifecycle]' "$LOG"; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=Native Docker sidecar compact::%s\n' "$msg"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -448,10 +466,27 @@ jobs:
         id: hermes
         run: |
           set -euo pipefail
+          LOG="$RUNNER_TEMP/hermes-build.log"
           HERMES_OUT="$RUNNER_TEMP/hermes-agent-sandbox"
-          nix build --print-build-logs --out-link "$HERMES_OUT" .#packages.x86_64-linux.hermes-agent-sandbox
+          set +e
+          nix build --print-build-logs --out-link "$HERMES_OUT" .#packages.x86_64-linux.hermes-agent-sandbox 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=Hermes build compact::%s\n' "$msg"
+            exit "$rc"
+          fi
           echo "path=$HERMES_OUT" >> "$GITHUB_OUTPUT"
-          env -u XDG_RUNTIME_DIR bash tests/test_hermes_agent.sh "$HERMES_OUT/bin/ocsb-hermes"
+          set +e
+          env -u XDG_RUNTIME_DIR bash tests/test_hermes_agent.sh "$HERMES_OUT/bin/ocsb-hermes" 2>&1 | tee -a "$LOG"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=Hermes wrapper compact::%s\n' "$msg"
+            exit "$rc"
+          fi
 
       - name: Push to cachix
         if: env.CACHIX_AUTH_TOKEN != ''
