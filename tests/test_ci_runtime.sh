@@ -69,6 +69,12 @@ require_workflow_runtime 'DEFAULT_OUT="$RUNNER_TEMP/ocsb-default"' \
   'default package out-link must be outside the repository'
 require_workflow_runtime 'nix build --out-link "$DEFAULT_OUT" .#packages.x86_64-linux.default' \
   'default package must be built to a runner-temp out-link'
+require_build_runtime 'Probe real bwrap runtime capability' \
+  'ordinary build job must probe real bwrap runtime capability'
+require_build_runtime 'BWRAP_RUNTIME_AVAILABLE=0' \
+  'ordinary build job must record unavailable bwrap runtime capability'
+require_build_runtime 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable' \
+  'ordinary build job must emit exact wrapper bwrap capability skip marker'
 require_workflow_runtime 'bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb"' \
   'wrapper runtime suite is missing'
 require_workflow_runtime 'bash tests/test_backend.sh .' \

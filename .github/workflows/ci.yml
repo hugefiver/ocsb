@@ -115,10 +115,34 @@ jobs:
           nix build --out-link "$DEFAULT_OUT" .#packages.x86_64-linux.default
           printf 'DEFAULT_OUT=%s\n' "$DEFAULT_OUT" >> "$GITHUB_ENV"
 
+      - name: Probe real bwrap runtime capability
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/wrapper-bwrap-probe.log"
+          set +e
+          env -u XDG_RUNTIME_DIR "$DEFAULT_OUT/bin/ocsb" \
+            -w ci-bwrap-probe --strategy direct --overwrite -- -c true \
+            >"$LOG" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            printf 'BWRAP_RUNTIME_AVAILABLE=1\n' >> "$GITHUB_ENV"
+          elif grep -Eq 'setting up uid map|user namespace|Operation not permitted|Permission denied' "$LOG"; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            printf 'BWRAP_RUNTIME_AVAILABLE=0\n' >> "$GITHUB_ENV"
+          else
+            cat "$LOG" >&2
+            exit "$rc"
+          fi
+
       - name: Wrapper runtime suite
         run: |
           set -euo pipefail
           LOG="$RUNNER_TEMP/wrapper-runtime.log"
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n' | tee "$LOG"
+            exit 0
+          fi
           set +e
           env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb" 2>&1 | tee "$LOG"
           rc=${PIPESTATUS[0]}
@@ -148,6 +172,10 @@ jobs:
       - name: Wrapper runtime pidfile fixture
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           env -u XDG_RUNTIME_DIR bash tests/test_wrapper.sh "$DEFAULT_OUT/bin/ocsb" --case runtime-pidfile-clobber
 
       - name: Backend runtime suite
@@ -178,16 +206,28 @@ jobs:
       - name: Git worktree runtime suite
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           env -u XDG_RUNTIME_DIR bash tests/test_git_worktree.sh "$DEFAULT_OUT/bin/ocsb"
 
       - name: Btrfs runtime suite
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           env -u XDG_RUNTIME_DIR bash tests/test_btrfs.sh "$DEFAULT_OUT/bin/ocsb"
 
       - name: Run dual-layer runtime suites
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           DUAL_OUT="$RUNNER_TEMP/ocsb-dual-default"
           DUAL_HOME_OUT="$RUNNER_TEMP/ocsb-dual-home"
           nix build --out-link "$DUAL_OUT" .#checks.x86_64-linux.dual-layer-test
@@ -219,6 +259,10 @@ jobs:
       - name: Run capability-based network suite
         run: |
           set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
           NET_OUT="$RUNNER_TEMP/ocsb-net-test"
           nix build --out-link "$NET_OUT" .#checks.x86_64-linux.net-test
           env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --case real-secondary "$NET_OUT/bin/ocsb-net-test"
