@@ -2474,10 +2474,6 @@ static int setup_bubblewrap_namespace(struct configuration *configuration, int *
   int root_uid_map_length;
   int root_gid_map_length;
 
-  if (configuration->bubblewrap_fd_sources && configuration->inherited_root_count == 0U) {
-    (void)original_cwd_fd;
-    return 0;
-  }
   if (unshare(CLONE_NEWUSER |
               (configuration->inherited_root_count == 0U ? CLONE_NEWNS : 0)) != 0) {
     return configuration->inherited_root_count == 0U
@@ -5475,6 +5471,97 @@ static int collapse_bubblewrap_overlay_groups(const struct configuration *config
   return 0;
 }
 
+static int rewrite_bubblewrap_user_namespace_args(const struct configuration *configuration,
+                                                  char **arguments, size_t *argument_count_out,
+                                                  size_t argument_capacity) {
+  const size_t original_count = *argument_count_out;
+  char **rewritten = NULL;
+  size_t read_index;
+  size_t write_index = 0U;
+  bool share_net = false;
+
+  if (configuration->backend != BACKEND_BUBBLEWRAP || !configuration->bubblewrap_fd_sources) {
+    return 0;
+  }
+  for (read_index = 0U; read_index < original_count; ++read_index) {
+    if (strcmp(arguments[read_index], "--share-net") == 0) {
+      share_net = true;
+      break;
+    }
+  }
+  rewritten = calloc(argument_capacity, sizeof(*rewritten));
+  if (rewritten == NULL) {
+    errorf("cannot allocate bubblewrap user namespace rewrite argv");
+    return -1;
+  }
+  for (read_index = 0U; read_index < original_count; ++read_index) {
+    if (strcmp(arguments[read_index], "--share-net") == 0) {
+      free(arguments[read_index]);
+      arguments[read_index] = NULL;
+      continue;
+    }
+    if ((strcmp(arguments[read_index], "--uid") == 0 ||
+         strcmp(arguments[read_index], "--gid") == 0) &&
+        read_index + 1U < original_count) {
+      free(arguments[read_index]);
+      free(arguments[read_index + 1U]);
+      arguments[read_index] = NULL;
+      arguments[read_index + 1U] = NULL;
+      ++read_index;
+      continue;
+    }
+    if (strcmp(arguments[read_index], "--unshare-all") == 0) {
+      static const char *const unshare_args[] = {
+        "--unshare-ipc", "--unshare-pid", "--unshare-uts", "--unshare-cgroup-try",
+      };
+      size_t item;
+
+      free(arguments[read_index]);
+      arguments[read_index] = NULL;
+      if (write_index + 7U >= argument_capacity) {
+        free(rewritten);
+        return bubblewrap_failure("bubblewrap user namespace rewrite overflow");
+      }
+      for (item = 0U; item < sizeof(unshare_args) / sizeof(unshare_args[0]); ++item) {
+        const char *value = unshare_args[item];
+
+        rewritten[write_index] = strdup(value);
+        if (rewritten[write_index] == NULL) {
+          goto failure;
+        }
+        ++write_index;
+      }
+      if (!share_net) {
+        rewritten[write_index] = strdup("--unshare-net");
+        if (rewritten[write_index] == NULL) {
+          goto failure;
+        }
+        ++write_index;
+      }
+      continue;
+    }
+    rewritten[write_index] = arguments[read_index];
+    arguments[read_index] = NULL;
+    ++write_index;
+  }
+  for (read_index = 0U; read_index < argument_capacity; ++read_index) {
+    free(arguments[read_index]);
+    arguments[read_index] = rewritten[read_index];
+    rewritten[read_index] = NULL;
+  }
+  free(rewritten);
+  *argument_count_out = write_index;
+  return 0;
+
+failure:
+  for (read_index = 0U; read_index < argument_capacity; ++read_index) {
+    free(rewritten[read_index]);
+  }
+  free(rewritten);
+  errorf("cannot rewrite bubblewrap user namespace argv");
+  return -1;
+}
+
 static int build_backend_argv(const struct configuration *configuration, char ***arguments_out,
                                char ***exec_arguments_out, size_t *argument_count_out) {
   char **arguments = NULL;
@@ -5482,9 +5569,10 @@ static int build_backend_argv(const struct configuration *configuration, char **
   bool *deleted_sources = NULL;
   size_t index;
   size_t argument_count = configuration->backend_argc;
+  size_t argument_capacity = configuration->backend_argc + 16U;
 
-  arguments = calloc(configuration->backend_argc, sizeof(*arguments));
-  exec_arguments = calloc(configuration->backend_argc + 1U, sizeof(*exec_arguments));
+  arguments = calloc(argument_capacity, sizeof(*arguments));
+  exec_arguments = calloc(argument_capacity + 1U, sizeof(*exec_arguments));
   if (configuration->source_count > 0U) {
     deleted_sources = calloc(configuration->source_count, sizeof(*deleted_sources));
   }
@@ -5584,6 +5672,10 @@ static int build_backend_argv(const struct configuration *configuration, char **
   }
   if (configuration->backend == BACKEND_BUBBLEWRAP && !configuration->bubblewrap_fd_sources &&
       collapse_bubblewrap_overlay_groups(configuration, arguments, &argument_count) != 0) {
+    goto failure;
+  }
+  if (rewrite_bubblewrap_user_namespace_args(configuration, arguments, &argument_count,
+                                             argument_capacity) != 0) {
     goto failure;
   }
   for (index = 0U; index < argument_count; ++index) {
@@ -5833,8 +5925,7 @@ int main(int argc, char **argv) {
     (void)fail_errno("mount anchoring unavailable: cannot preserve current working directory", NULL);
     goto cleanup;
   }
-  if (!configuration.bubblewrap_fd_sources &&
-      setup_namespace(&configuration, &original_cwd_fd) != 0) {
+  if (setup_namespace(&configuration, &original_cwd_fd) != 0) {
     goto cleanup;
   }
   if (close(runtime_root_fd) != 0) {
