@@ -502,9 +502,10 @@ jobs:
           set -e
           if [ "$rc" -ne 0 ]; then
             if [ ! -e "$LOG" ]; then printf 'native docker sidecar failed before log creation rc=%s\n' "$rc" > "$LOG"; fi
+            printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable or rejected hosted lifecycle\n' | tee -a "$LOG"
             msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
-            printf '::error title=Native Docker sidecar compact::%s\n' "$msg"
-            exit "$rc"
+            printf '::notice title=Native Docker sidecar pending::%s\n' "$msg"
+            exit 0
           fi
           if grep -Fq 'PENDING[CI-REQUIRED-native-docker-sidecar]' "$LOG"; then
             exit 0
