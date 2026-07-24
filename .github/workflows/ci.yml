@@ -318,6 +318,7 @@ jobs:
       - name: Verify real rootless Podman mount anchoring
         run: |
           set -euo pipefail
+          set +e
           nix develop .#backend-test -c bash -c '
             set -euo pipefail
             LOG="$RUNNER_TEMP/14-real-podman-green.log"
@@ -335,6 +336,15 @@ jobs:
             grep -Fq "PASS[GREEN-real-rootless-podman-anchor]: uid=$HOST_UID source=original" \
               "$LOG"
           '
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            LOG="$RUNNER_TEMP/14-real-podman-green.log"
+            if [ ! -e "$LOG" ]; then printf 'podman-anchor failed before log creation rc=%s\n' "$rc" > "$LOG"; fi
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=Podman anchor compact::%s\n' "$msg"
+            exit "$rc"
+          fi
           if ! grep -Fq 'PASS[GREEN-real-rootless-podman-anchor]' "$RUNNER_TEMP/14-real-podman-green.log"; then
             msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$RUNNER_TEMP/14-real-podman-green.log")
             printf '::error title=Podman anchor compact::%s\n' "$msg"
@@ -358,6 +368,7 @@ jobs:
       - name: Verify native rootless Podman sidecar lifecycle
         run: |
           set -euo pipefail
+          set +e
           nix develop .#backend-test -c bash -c '
             set -euo pipefail
             IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
@@ -377,6 +388,15 @@ jobs:
             grep -Fq "PASS[GREEN-sidecar-native-podman-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env" "$LOG"
             grep -Fq "CLEANUP PASS: native podman sidecar container processes persist cidfiles fifos outlinks mounts removed" "$LOG"
           '
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            LOG="$RUNNER_TEMP/19-native-podman-sidecar-green.log"
+            if [ ! -e "$LOG" ]; then printf 'native podman sidecar failed before log creation rc=%s\n' "$rc" > "$LOG"; fi
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=Native Podman sidecar compact::%s\n' "$msg"
+            exit "$rc"
+          fi
           if ! grep -Fq 'PASS[GREEN-sidecar-native-podman-lifecycle]' "$RUNNER_TEMP/19-native-podman-sidecar-green.log"; then
             msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$RUNNER_TEMP/19-native-podman-sidecar-green.log")
             printf '::error title=Native Podman sidecar compact::%s\n' "$msg"
@@ -402,6 +422,7 @@ jobs:
           set -euo pipefail
           LOG="$RUNNER_TEMP/19-native-docker-sidecar-green.log"
           trap 'rc=$?; printf "native docker sidecar failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"' ERR
+          set +e
           DOCKER_BIN=$(command -v docker)
           case "$DOCKER_BIN" in /usr/bin/docker|/bin/docker|*/docker) ;; *) printf "unexpected docker: %s\n" "$DOCKER_BIN" >&2; exit 1 ;; esac
           docker info >/dev/null
@@ -418,6 +439,14 @@ jobs:
           OCSB_NATIVE_DOCKER_REQUIRED=1 bash tests/test_ironclaw.sh --case native-sidecar-lifecycle docker "$WRAPPER" | tee -a "$LOG"
           grep -Fq 'PASS[GREEN-sidecar-native-docker-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env' "$LOG"
           grep -Fq 'CLEANUP PASS: native docker sidecar container processes persist cidfiles fifos outlinks mounts removed' "$LOG"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            if [ ! -e "$LOG" ]; then printf 'native docker sidecar failed before log creation rc=%s\n' "$rc" > "$LOG"; fi
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=Native Docker sidecar compact::%s\n' "$msg"
+            exit "$rc"
+          fi
           if ! grep -Fq 'PASS[GREEN-sidecar-native-docker-lifecycle]' "$LOG"; then
             msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
             printf '::error title=Native Docker sidecar compact::%s\n' "$msg"
