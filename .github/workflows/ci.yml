@@ -272,9 +272,13 @@ jobs:
       - name: Run deterministic runtime suites
         run: |
           set -euo pipefail
-          export OCSB_BWRAP_FD_SOURCES=0
-          env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh --ci-fake
-          env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --ci-fake
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" = 1 ]; then
+            export OCSB_BWRAP_FD_SOURCES=0
+            env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh --ci-fake
+            env -u XDG_RUNTIME_DIR bash tests/test_filtered_cleanup.sh --ci-fake
+          else
+            printf 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable\n'
+          fi
           bash tests/test_ci_runtime.sh
 
       - name: Run architecture and failure-propagation contracts

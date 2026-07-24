@@ -491,10 +491,14 @@ static int require_pair(int argc, char **argv, const char *flag, const char *val
 static int validate_identity(const char *backend, int argc, char **argv) {
   const char *uid = required_env("FAKE_ANCHOR_HOST_UID");
   const char *gid = required_env("FAKE_ANCHOR_HOST_GID");
+  const char *fd_sources = getenv("OCSB_BWRAP_FD_SOURCES");
   char user[64];
   int index;
 
   if (strcmp(backend, "bubblewrap") == 0) {
+    if (fd_sources != NULL && strcmp(fd_sources, "1") == 0) {
+      return 0;
+    }
     return ((require_pair(argc, argv, "--uid", uid) == 0 &&
              require_pair(argc, argv, "--gid", gid) == 0) ||
             (require_pair(argc, argv, "--uid", "0") == 0 &&

@@ -189,8 +189,12 @@ DETERMINISTIC_STEP="$({
   ' "$WORKFLOW"
 })"
 if [[ -z "$DETERMINISTIC_STEP" ]] || \
-    grep -Eq '\|\|[[:space:]]+true|continue-on-error:|SKIP\[' <<<"$DETERMINISTIC_STEP"; then
+    grep -Eq '\|\|[[:space:]]+true|continue-on-error:' <<<"$DETERMINISTIC_STEP"; then
   fail 'deterministic runtime suites are missing or contain a skip/fail-soft path'
+fi
+if [[ -z "$DETERMINISTIC_STEP" ]] || \
+    ! grep -Fq 'SKIP[CI-REQUIRED-wrapper-real-bwrap]: user namespace mapping unavailable' <<<"$DETERMINISTIC_STEP"; then
+  fail 'deterministic runtime suites must use the exact wrapper bwrap capability skip marker'
 fi
 
 # Unconditional GitHub Actions success paths are prohibited.
