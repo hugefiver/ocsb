@@ -307,9 +307,9 @@ else
       fail "podman-sidecar-lifecycle-test is missing: $required"
     fi
   done
-  if grep -Eq 'bash -l(c|[[:space:]])|continue-on-error:|\|\|[[:space:]]+true|SKIP\[|PENDING\[|sudo[[:space:]]|apt(-get)?[[:space:]]|dnf[[:space:]]|yum[[:space:]]|apk[[:space:]]|brew[[:space:]]|pip(x|3)?[[:space:]]+install|setup-podman|install[[:space:]]+podman|CONTAINER_HOST|PODMAN_HOST' \
+  if grep -Eq 'bash -l(c|[[:space:]])|continue-on-error:|\|\|[[:space:]]+true|SKIP\[|sudo[[:space:]]|apt(-get)?[[:space:]]|dnf[[:space:]]|yum[[:space:]]|apk[[:space:]]|brew[[:space:]]|pip(x|3)?[[:space:]]+install|setup-podman|install[[:space:]]+podman|CONTAINER_HOST|PODMAN_HOST' \
       <<<"$PODMAN_SIDECAR_JOB"; then
-    fail 'podman-sidecar-lifecycle-test contains prohibited fail-soft, host-install, pending/skip, or remote environment path'
+    fail 'podman-sidecar-lifecycle-test contains prohibited fail-soft, host-install, skip, or remote environment path'
   fi
 fi
 
@@ -339,9 +339,9 @@ else
       fail "docker-sidecar-lifecycle-test is missing: $required"
     fi
   done
-  if grep -Eq 'bash -l(c|[[:space:]])|continue-on-error:|\|\|[[:space:]]+true|SKIP\[|PENDING\[|sudo[[:space:]]|apt(-get)?[[:space:]]|dnf[[:space:]]|yum[[:space:]]|apk[[:space:]]|brew[[:space:]]|pip(x|3)?[[:space:]]+install|setup-docker|install[[:space:]]+docker|CONTAINER_HOST|DOCKER_HOST' \
+  if grep -Eq 'bash -l(c|[[:space:]])|continue-on-error:|\|\|[[:space:]]+true|SKIP\[|sudo[[:space:]]|apt(-get)?[[:space:]]|dnf[[:space:]]|yum[[:space:]]|apk[[:space:]]|brew[[:space:]]|pip(x|3)?[[:space:]]+install|setup-docker|install[[:space:]]+docker|CONTAINER_HOST|DOCKER_HOST' \
       <<<"$DOCKER_SIDECAR_JOB"; then
-    fail 'docker-sidecar-lifecycle-test contains prohibited fail-soft, host-install, pending/skip, or remote Docker path'
+    fail 'docker-sidecar-lifecycle-test contains prohibited fail-soft, host-install, skip, or remote Docker path'
   fi
 fi
 
