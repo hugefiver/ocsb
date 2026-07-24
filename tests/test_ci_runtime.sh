@@ -270,7 +270,7 @@ else
     fi
   done
 
-  if grep -Eq 'bash -l(c|[[:space:]])|continue-on-error:|\|\|[[:space:]]+true|SKIP\[|sudo[[:space:]]|apt(-get)?[[:space:]]|dnf[[:space:]]|yum[[:space:]]|apk[[:space:]]|brew[[:space:]]|pip(x|3)?[[:space:]]+install|setup-podman|install[[:space:]]+podman|CONTAINER_HOST|PODMAN_HOST|--remote' \
+  if grep -Eq 'bash -l(c|[[:space:]])|continue-on-error:|\|\|[[:space:]]+true|SKIP\[|sudo[[:space:]]|apt(-get)?[[:space:]]|dnf[[:space:]]|yum[[:space:]]|apk[[:space:]]|brew[[:space:]]|pip(x|3)?[[:space:]]+install|setup-podman|install[[:space:]]+podman|CONTAINER_HOST|PODMAN_HOST|--remote[[:space:]]|--remote=true' \
       <<<"$PODMAN_JOB"; then
     fail 'podman-anchor-test contains a prohibited fail-soft, login, host-install, skip, or remote-Podman path'
   fi
