@@ -251,7 +251,8 @@ else
     'needs: build' \
     'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
     'DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a' \
-    "nix develop .#backend-test -c bash -c '" \
+    'cat > "$RUNNER_TEMP/podman-anchor.sh" <<' \
+    'nix develop .#backend-test -c bash "$RUNNER_TEMP/podman-anchor.sh"' \
     'PODMAN_BIN=$(command -v podman)' \
     'case "$PODMAN_BIN" in /nix/store/*/bin/podman)' \
     'PODMAN_ROOTLESS=$(podman --remote=false info --format "{{.Host.Security.Rootless}}" 2>&1)' \
@@ -287,7 +288,8 @@ else
     'needs: build' \
     'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
     'DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a' \
-    "nix develop .#backend-test -c bash -c '" \
+    'cat > "$RUNNER_TEMP/native-podman-sidecar.sh" <<' \
+    'nix develop .#backend-test -c bash "$RUNNER_TEMP/native-podman-sidecar.sh"' \
     'PODMAN_BIN=$(command -v podman)' \
     'case "$PODMAN_BIN" in /nix/store/*/bin/podman)' \
     'podman --remote=false pull "$IMAGE"' \

@@ -2725,7 +2725,7 @@ fi
 
 is_real_bwrap_capability_denial() {
   grep -Eq \
-    'Creating new namespace failed: Operation not permitted|No permissions to create new namespace|RTM_NEWADDR.*Operation not permitted' \
+    'Creating new namespace failed: Operation not permitted|No permissions to create new namespace|RTM_NEWADDR.*Operation not permitted|setting up uid map: Permission denied|mount anchoring unavailable.*(Operation not permitted|Permission denied)' \
     <<<"$1"
 }
 

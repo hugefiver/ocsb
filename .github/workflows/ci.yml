@@ -318,34 +318,35 @@ jobs:
       - name: Verify real rootless Podman mount anchoring
         run: |
           set -euo pipefail
+          cat > "$RUNNER_TEMP/podman-anchor.sh" <<'BASH'
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/14-real-podman-green.log"
+          trap 'rc=$?; printf "podman-anchor failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"' ERR
+          PODMAN_BIN=$(command -v podman)
+          case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
+          printf "PODMAN_BIN=%s\n" "$PODMAN_BIN" | tee "$LOG"
+          podman --remote=false --version | tee -a "$LOG"
+          PODMAN_ROOTLESS=$(podman --remote=false info --format "{{.Host.Security.Rootless}}" 2>&1) || {
+            printf "PODMAN_INFO_ERROR=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
+            printf 'PENDING[CI-REQUIRED-real-podman-anchor]: rootless podman unavailable\n' | tee -a "$LOG"
+            exit 0
+          }
+          printf "PODMAN_ROOTLESS=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
+          if [ "$PODMAN_ROOTLESS" != true ]; then
+            printf 'PENDING[CI-REQUIRED-real-podman-anchor]: rootless podman unavailable\n' | tee -a "$LOG"
+            exit 0
+          fi
+          HOST_UID=$(id -u)
+          OUT="$RUNNER_TEMP/ocsb-podman-anchor"
+          nix build --out-link "$OUT" .#packages.x86_64-linux.default
+          env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh \
+            --case real-rootless-podman "$OUT/bin/ocsb" \
+            | tee -a "$LOG"
+          grep -Fq "PASS[GREEN-real-rootless-podman-anchor]: uid=$HOST_UID source=original" \
+            "$LOG"
+          BASH
           set +e
-          nix develop .#backend-test -c bash -c '
-            set -euo pipefail
-            LOG="$RUNNER_TEMP/14-real-podman-green.log"
-            trap '\''rc=$?; printf "podman-anchor failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"'\'' ERR
-            PODMAN_BIN=$(command -v podman)
-            case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
-            printf "PODMAN_BIN=%s\n" "$PODMAN_BIN" | tee "$LOG"
-            podman --remote=false --version | tee -a "$LOG"
-            PODMAN_ROOTLESS=$(podman --remote=false info --format "{{.Host.Security.Rootless}}" 2>&1) || {
-              printf "PODMAN_INFO_ERROR=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
-              printf 'PENDING[CI-REQUIRED-real-podman-anchor]: rootless podman unavailable\n' | tee -a "$LOG"
-              exit 0
-            }
-            printf "PODMAN_ROOTLESS=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
-            if [ "$PODMAN_ROOTLESS" != true ]; then
-              printf 'PENDING[CI-REQUIRED-real-podman-anchor]: rootless podman unavailable\n' | tee -a "$LOG"
-              exit 0
-            fi
-            HOST_UID=$(id -u)
-            OUT="$RUNNER_TEMP/ocsb-podman-anchor"
-            nix build --out-link "$OUT" .#packages.x86_64-linux.default
-            env -u XDG_RUNTIME_DIR bash tests/test_mount_anchor.sh \
-              --case real-rootless-podman "$OUT/bin/ocsb" \
-              | tee -a "$LOG"
-            grep -Fq "PASS[GREEN-real-rootless-podman-anchor]: uid=$HOST_UID source=original" \
-              "$LOG"
-          '
+          nix develop .#backend-test -c bash "$RUNNER_TEMP/podman-anchor.sh"
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
@@ -380,36 +381,37 @@ jobs:
       - name: Verify native rootless Podman sidecar lifecycle
         run: |
           set -euo pipefail
+          cat > "$RUNNER_TEMP/native-podman-sidecar.sh" <<'BASH'
+          set -euo pipefail
+          IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
+          LOG="$RUNNER_TEMP/19-native-podman-sidecar-green.log"
+          trap 'rc=$?; printf "native podman sidecar failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"' ERR
+          PODMAN_BIN=$(command -v podman)
+          case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
+          podman --remote=false --version | tee "$LOG"
+          PODMAN_ROOTLESS=$(podman --remote=false info --format "{{.Host.Security.Rootless}}" 2>&1) || {
+            printf "PODMAN_INFO_ERROR=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
+            printf 'PENDING[CI-REQUIRED-native-podman-sidecar]: rootless podman unavailable\n' | tee -a "$LOG"
+            exit 0
+          }
+          printf "PODMAN_ROOTLESS=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
+          if [ "$PODMAN_ROOTLESS" != true ]; then
+            printf 'PENDING[CI-REQUIRED-native-podman-sidecar]: rootless podman unavailable\n' | tee -a "$LOG"
+            exit 0
+          fi
+          podman --remote=false pull "$IMAGE"
+          IMAGE_ID=$(podman --remote=false image inspect "$IMAGE" --format "{{.Id}}")
+          REPODIGESTS=$(podman --remote=false image inspect "$IMAGE" --format "{{json .RepoDigests}}")
+          test -n "$IMAGE_ID"
+          printf "%s" "$REPODIGESTS" | grep -Fq "sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0"
+          printf "%s\n" "PINNED_IMAGE_RUNTIME=podman" "PINNED_IMAGE_REQUEST=$IMAGE" "PINNED_IMAGE_ID=$IMAGE_ID" "PINNED_IMAGE_REPODIGESTS=$REPODIGESTS" > "$LOG"
+          WRAPPER=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/native-podman-wrapper")
+          OCSB_NATIVE_PODMAN_REQUIRED=1 bash tests/test_ironclaw.sh --case native-sidecar-lifecycle podman "$WRAPPER" | tee -a "$LOG"
+          grep -Fq "PASS[GREEN-sidecar-native-podman-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env" "$LOG"
+          grep -Fq "CLEANUP PASS: native podman sidecar container processes persist cidfiles fifos outlinks mounts removed" "$LOG"
+          BASH
           set +e
-          nix develop .#backend-test -c bash -c '
-            set -euo pipefail
-            IMAGE=docker.io/pgvector/pgvector:pg18@sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0
-            LOG="$RUNNER_TEMP/19-native-podman-sidecar-green.log"
-            trap '\''rc=$?; printf "native podman sidecar failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"'\'' ERR
-            PODMAN_BIN=$(command -v podman)
-            case "$PODMAN_BIN" in /nix/store/*/bin/podman) ;; *) printf "unexpected podman: %s\n" "$PODMAN_BIN" >&2; exit 1 ;; esac
-            podman --remote=false --version | tee "$LOG"
-            PODMAN_ROOTLESS=$(podman --remote=false info --format "{{.Host.Security.Rootless}}" 2>&1) || {
-              printf "PODMAN_INFO_ERROR=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
-              printf 'PENDING[CI-REQUIRED-native-podman-sidecar]: rootless podman unavailable\n' | tee -a "$LOG"
-              exit 0
-            }
-            printf "PODMAN_ROOTLESS=%s\n" "$PODMAN_ROOTLESS" | tee -a "$LOG"
-            if [ "$PODMAN_ROOTLESS" != true ]; then
-              printf 'PENDING[CI-REQUIRED-native-podman-sidecar]: rootless podman unavailable\n' | tee -a "$LOG"
-              exit 0
-            fi
-            podman --remote=false pull "$IMAGE"
-            IMAGE_ID=$(podman --remote=false image inspect "$IMAGE" --format "{{.Id}}")
-            REPODIGESTS=$(podman --remote=false image inspect "$IMAGE" --format "{{json .RepoDigests}}")
-            test -n "$IMAGE_ID"
-            printf "%s" "$REPODIGESTS" | grep -Fq "sha256:12a379b47ad65289572ea0756efc11b7c241a6662833e8af7038cd3b73d647e0"
-            printf "%s\n" "PINNED_IMAGE_RUNTIME=podman" "PINNED_IMAGE_REQUEST=$IMAGE" "PINNED_IMAGE_ID=$IMAGE_ID" "PINNED_IMAGE_REPODIGESTS=$REPODIGESTS" > "$LOG"
-            WRAPPER=$(bash tests/test_ironclaw.sh --build-lightweight-wrapper "$RUNNER_TEMP/native-podman-wrapper")
-            OCSB_NATIVE_PODMAN_REQUIRED=1 bash tests/test_ironclaw.sh --case native-sidecar-lifecycle podman "$WRAPPER" | tee -a "$LOG"
-            grep -Fq "PASS[GREEN-sidecar-native-podman-lifecycle]: pull-provenance create-exit-inspect-stop-once-restart-inspect-running-reuse-same-id no-second-stop prepare-decision-ack bare-entrypoint-argv-env" "$LOG"
-            grep -Fq "CLEANUP PASS: native podman sidecar container processes persist cidfiles fifos outlinks mounts removed" "$LOG"
-          '
+          nix develop .#backend-test -c bash "$RUNNER_TEMP/native-podman-sidecar.sh"
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
@@ -448,8 +450,16 @@ jobs:
           : > "$LOG"
           trap 'rc=$?; printf "native docker sidecar failed rc=%s\n" "$rc" | tee -a "$LOG"; exit "$rc"' ERR
           set +e
-          DOCKER_BIN=$(command -v docker)
+          if command -v docker >/dev/null 2>&1; then
+            DOCKER_BIN=$(command -v docker)
+          else
+            DOCKER_BIN=""
+          fi
           printf 'DOCKER_BIN=%s\n' "$DOCKER_BIN" | tee -a "$LOG"
+          if [ -z "$DOCKER_BIN" ]; then
+            printf 'PENDING[CI-REQUIRED-native-docker-sidecar]: local docker unavailable\n' | tee -a "$LOG"
+            exit 0
+          fi
           case "$DOCKER_BIN" in /usr/bin/docker|/bin/docker|*/docker) ;; *) printf "unexpected docker: %s\n" "$DOCKER_BIN" >&2; exit 1 ;; esac
           docker version --format '{{.Server.Version}}' 2>&1 | sed 's/^/DOCKER_SERVER_VERSION=/' | tee -a "$LOG"
           if ! docker info 2>&1 | sed -n '1,80p' | tee -a "$LOG" >/dev/null; then
