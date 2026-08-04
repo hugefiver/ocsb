@@ -191,9 +191,9 @@ nix profile install github:hugefiver/ocsb#hermes-agent-sandbox
 ### 版本切换
 
 ```bash
-# 使用特定版本的上游 Hermes Agent（override-input 方式）
+# 使用 Hermes Agent 0.20.0 对应的上游 tag（override-input 方式）
 nix run github:hugefiver/ocsb#hermes-agent-sandbox \
-  --override-input hermes-agent github:NousResearch/hermes-agent/v2026.7.20
+  --override-input hermes-agent github:NousResearch/hermes-agent/v2026.8.3
 
 # 裸上游 Hermes Agent（不经 ocsb 包装，直接运行上游 flake 默认输出）
 nix run github:hugefiver/ocsb#hermes-agent
