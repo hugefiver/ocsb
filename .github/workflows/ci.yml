@@ -41,6 +41,24 @@ jobs:
       - name: Check flake
         run: nix flake check --no-build
 
+      - name: Programs validation and backend plan
+        run: |
+          set -euo pipefail
+          bash tests/test_programs.sh . --case validation
+          bash tests/test_programs.sh . --case backend-plan
+
+      - name: DSSB source assertions
+        run: |
+          set -euo pipefail
+          bash tests/test_dssb.sh --source-only
+
+      - name: DSSB lightweight wrapper fixture
+        run: |
+          set -euo pipefail
+          DSSB_FAKE=$(bash tests/test_dssb.sh --build-lightweight-wrapper "$RUNNER_TEMP/dssb-wrapper")
+          bash tests/test_dssb.sh --case wrapper-contract "$DSSB_FAKE"
+          DEEPSEEK_API_KEY=fixture-secret bash tests/test_dssb.sh --case wrapper-safety "$DSSB_FAKE"
+
       - name: Hermes source assertions
         run: |
           set -euo pipefail
@@ -134,6 +152,17 @@ jobs:
             cat "$LOG" >&2
             exit "$rc"
           fi
+
+      - name: DSSB fake module bubblewrap fixture
+        run: |
+          set -euo pipefail
+          if [ "${BWRAP_RUNTIME_AVAILABLE:-0}" != 1 ]; then
+            printf 'SKIP[CI-REQUIRED-dssb-real-bwrap]: user namespace mapping unavailable\n'
+            exit 0
+          fi
+          DSSB_MODULE=$(bash tests/test_dssb.sh --build-sandbox-fixture "$RUNNER_TEMP/dssb-module")
+          env -u XDG_RUNTIME_DIR bash tests/test_dssb.sh --case module-bubblewrap "$DSSB_MODULE"
+          env -u XDG_RUNTIME_DIR bash tests/test_programs.sh . --case runtime
 
       - name: Wrapper runtime suite
         run: |
@@ -527,6 +556,76 @@ jobs:
           path: ${{ runner.temp }}/19-native-docker-sidecar-green.log
           if-no-files-found: error
           retention-days: 14
+
+  dssb-build:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 120
+    env:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+    concurrency:
+      group: dssb-build-${{ github.sha }}
+      cancel-in-progress: false
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a
+
+      - uses: cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc
+        with:
+          name: hugefiver
+          authToken: '${{ env.CACHIX_AUTH_TOKEN }}'
+
+      - uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569
+        continue-on-error: true
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.sha }}
+          restore-prefixes-first-match: |
+            nix-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+            nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+          upload-chunk-size: 67108864
+
+      - name: Build and test dssb
+        id: dssb
+        run: |
+          set -euo pipefail
+          LOG="$RUNNER_TEMP/dssb-build.log"
+          DSH_OUT="$RUNNER_TEMP/dsh"
+          DSSB_OUT="$RUNNER_TEMP/dssb"
+          set +e
+          nix build --print-build-logs --out-link "$DSH_OUT" .#packages.x86_64-linux.dsh 2>&1 | tee "$LOG"
+          dsh_rc=${PIPESTATUS[0]}
+          nix build --print-build-logs --out-link "$DSSB_OUT" .#packages.x86_64-linux.dssb 2>&1 | tee -a "$LOG"
+          dssb_rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$dsh_rc" -ne 0 ] || [ "$dssb_rc" -ne 0 ]; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=DSSB build compact::%s\n' "$msg"
+            exit 1
+          fi
+          test -f "$DSH_OUT/nix-support/dssb-node-pty-native-smoke"
+          grep -Fxq 'DSSB_NODE_PTY_NATIVE_OK' "$DSH_OUT/nix-support/dssb-node-pty-native-smoke"
+          echo "package=$DSH_OUT" >> "$GITHUB_OUTPUT"
+          echo "wrapper=$DSSB_OUT" >> "$GITHUB_OUTPUT"
+          set +e
+          env -u XDG_RUNTIME_DIR bash tests/test_dssb.sh --case real-wrapper "$DSSB_OUT/bin/dssb" 2>&1 | tee -a "$LOG"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            msg=$(python3 -c 'import sys; from pathlib import Path; text = Path(sys.argv[1]).read_text(errors="replace")[-12000:]; print(text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))' "$LOG")
+            printf '::error title=DSSB real wrapper compact::%s\n' "$msg"
+            exit "$rc"
+          fi
+
+      - name: Push to cachix
+        if: env.CACHIX_AUTH_TOKEN != ''
+        run: |
+          nix path-info --recursive \
+            '${{ steps.dssb.outputs.package }}' \
+            '${{ steps.dssb.outputs.wrapper }}' \
+            | cachix push hugefiver
 
   hermes-build:
     runs-on: ubuntu-latest

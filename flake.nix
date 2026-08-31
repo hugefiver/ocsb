@@ -71,10 +71,16 @@
         in
         import ./lib/mkSandbox.nix { inherit pkgs; lib = nixpkgs.lib; };
 
+      nixModules.dssb = import ./dssb/module.nix;
+
       packages = forAllSystems (system:
         let
           pkgs = mkPkgs system;
           mkSandbox = import ./lib/mkSandbox.nix { inherit pkgs; lib = nixpkgs.lib; };
+          dssbProject = import ./dssb {
+            inherit pkgs mkSandbox;
+            dssbModule = self.nixModules.dssb;
+          };
 
           hermesAgentPackage = hermes-agent.packages.${system}.default;
           hermesServicePackage = import ./lib/hermes-service.nix { inherit pkgs; };
@@ -157,6 +163,9 @@
         {
           default = mkSandbox (import ./templates/opencode.nix { inherit pkgs; });
 
+          dsh = dssbProject.package;
+          dssb = dssbProject.wrapper;
+
           ocsb-sidecar-gate = sidecarGate;
 
           hermes-agent = hermesAgentPackage;
@@ -176,9 +185,19 @@
         let
           pkgs = mkPkgs system;
           mkSandbox = import ./lib/mkSandbox.nix { inherit pkgs; lib = nixpkgs.lib; };
+          fakeDsh = pkgs.writeShellScriptBin "dsh" ''
+            printf '%s\n' 'fake dsh check'
+          '';
+          fakeDssbProject = import ./dssb {
+            inherit pkgs mkSandbox;
+            dssbModule = self.nixModules.dssb;
+            dshPackage = fakeDsh;
+          };
         in
         {
           default = self.packages.${system}.default;
+
+          dssb-module-test = fakeDssbProject.sandboxBase;
 
           ironclaw-retention-policy =
             let

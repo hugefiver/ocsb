@@ -8,6 +8,8 @@ WORKFLOW="$REPO_ROOT/.github/workflows/ci.yml"
 FLAKE="$REPO_ROOT/flake.nix"
 HERMES_TEST="$SCRIPT_DIR/test_hermes_agent.sh"
 IRONCLAW_TEST="$SCRIPT_DIR/test_ironclaw.sh"
+DSSB_TEST="$SCRIPT_DIR/test_dssb.sh"
+DSSB_PACKAGE="$REPO_ROOT/dssb/package.nix"
 MOUNT_TEST="$SCRIPT_DIR/test_mount_anchor.sh"
 FILTERED_TEST="$SCRIPT_DIR/test_filtered_cleanup.sh"
 
@@ -51,6 +53,15 @@ require_build_runtime() {
   fi
 }
 
+require_dssb_job() {
+  local literal="$1"
+  local description="$2"
+
+  if [[ -z "$DSSB_BUILD_JOB" ]] || ! grep -Fq -- "$literal" <<<"$DSSB_BUILD_JOB"; then
+    fail "$description"
+  fi
+}
+
 [[ -r "$WORKFLOW" ]] || {
   echo "FAIL[ci-runtime-contract]: workflow is unreadable: $WORKFLOW" >&2
   exit 1
@@ -60,6 +71,14 @@ BUILD_JOB="$({
   awk '
     /^  build:/ { capture = 1 }
     capture && /^  [A-Za-z0-9_-]+:/ && $1 != "build:" { exit }
+    capture { print }
+  ' "$WORKFLOW"
+})"
+
+DSSB_BUILD_JOB="$({
+  awk '
+    /^  dssb-build:/ { capture = 1 }
+    capture && /^  [A-Za-z0-9_-]+:/ && $1 != "dssb-build:" { exit }
     capture { print }
   ' "$WORKFLOW"
 })"
@@ -116,6 +135,48 @@ require_workflow_runtime 'env -u XDG_RUNTIME_DIR bash tests/test_failure_propaga
 require_workflow_runtime 'bash tests/test_ci_runtime.sh' \
   'CI runtime contract is not self-invoked'
 
+# The ordinary job may inspect the official package source but must never build
+# its payload. Official dsh/dssb outputs are confined to dssb-build below.
+if grep -Fq -- '.#packages.x86_64-linux.dsh' <<<"$BUILD_JOB" || \
+    grep -Fq -- '.#packages.x86_64-linux.dssb' <<<"$BUILD_JOB"; then
+  fail 'ordinary build job must not build official dsh or dssb payloads'
+fi
+
+for required in \
+  'bash tests/test_programs.sh . --case validation' \
+  'bash tests/test_programs.sh . --case backend-plan' \
+  'bash tests/test_dssb.sh --source-only' \
+  'bash tests/test_dssb.sh --build-lightweight-wrapper' \
+  'bash tests/test_dssb.sh --case wrapper-contract' \
+  'DEEPSEEK_API_KEY=fixture-secret bash tests/test_dssb.sh --case wrapper-safety' \
+  'bash tests/test_dssb.sh --build-sandbox-fixture' \
+  'bash tests/test_dssb.sh --case module-bubblewrap' \
+  'bash tests/test_programs.sh . --case runtime'; do
+  require_build_runtime "$required" "unconditional DSSB source/lightweight path is missing: $required"
+done
+require_build_runtime 'SKIP[CI-REQUIRED-dssb-real-bwrap]: user namespace mapping unavailable' \
+  'ordinary build job must emit the dedicated DSSB bwrap capability skip marker'
+
+# DSSB must keep Nixpkgs' npmConfigHook lifecycle: no package-level global
+# ignore-scripts, no configure override, and no handwritten npm lifecycle.
+if [[ ! -r "$DSSB_PACKAGE" ]]; then
+  fail "DSSB package source is unreadable: $DSSB_PACKAGE"
+else
+  if grep -Eq -- 'npmFlags[[:space:]]*=[[:space:]]*\[[^]]*--ignore-scripts' "$DSSB_PACKAGE" || \
+      grep -Eq -- 'npm_config_ignore_scripts|^[[:space:]]*configurePhase[[:space:]]*=|(^|[[:space:];])npm[[:space:]]+(install|ci|rebuild)([[:space:]]|$)' "$DSSB_PACKAGE"; then
+    fail 'DSSB package overrides npmConfigHook lifecycle'
+  fi
+  for required in \
+    "postConfigure = ''" \
+    'import * as nodePty from "node-pty";' \
+    'nodePty.spawn(process.execPath' \
+    'DSSB_NODE_PTY_CHILD_OK' \
+    'DSSB_NODE_PTY_NATIVE_OK' \
+    'nix-support/dssb-node-pty-native-smoke'; do
+    require_literal "$DSSB_PACKAGE" "$required" "DSSB native-smoke source is missing: $required" || true
+  done
+fi
+
 # Focused regressions must remain explicit in the ordinary build job; the broad
 # suites above are not a substitute because they may intentionally select a
 # different case set.
@@ -126,6 +187,42 @@ for required in \
   'bash tests/test_backend.sh . --case generic-daemon-pip'; do
   require_build_runtime "$required" "ordinary build job is missing focused runtime case: $required"
 done
+
+# dssb-build is the only job allowed to build the official payload. It must
+# preserve both the cached native-smoke receipt and an actual wrapper runtime
+# smoke before pushing both closures to Cachix.
+if [[ -z "$DSSB_BUILD_JOB" ]]; then
+  fail 'dedicated DSSB built-wrapper path is missing'
+else
+  for required in \
+    'runs-on: ubuntu-latest' \
+    'needs: build' \
+    'timeout-minutes: 120' \
+    'CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}' \
+    'group: dssb-build-${{ github.sha }}' \
+    'cancel-in-progress: false' \
+    "if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'" \
+    'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5' \
+    'DeterminateSystems/nix-installer-action@00199f951aeb9404028a6e4b95ad42546f73296a' \
+    'cachix/cachix-action@ad2ddac53f961de1989924296a1f236fcfbaa4fc' \
+    'nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569' \
+    'DSH_OUT="$RUNNER_TEMP/dsh"' \
+    'DSSB_OUT="$RUNNER_TEMP/dssb"' \
+    'nix build --print-build-logs --out-link "$DSH_OUT" .#packages.x86_64-linux.dsh' \
+    'nix build --print-build-logs --out-link "$DSSB_OUT" .#packages.x86_64-linux.dssb' \
+    '$DSH_OUT/nix-support/dssb-node-pty-native-smoke' \
+    "grep -Fxq 'DSSB_NODE_PTY_NATIVE_OK'" \
+    'echo "package=$DSH_OUT" >> "$GITHUB_OUTPUT"' \
+    'echo "wrapper=$DSSB_OUT" >> "$GITHUB_OUTPUT"' \
+    'bash tests/test_dssb.sh --case real-wrapper "$DSSB_OUT/bin/dssb"' \
+    'if: env.CACHIX_AUTH_TOKEN !=' \
+    '${{ steps.dssb.outputs.package }}' \
+    '${{ steps.dssb.outputs.wrapper }}' \
+    'nix path-info --recursive' \
+    'cachix push hugefiver'; do
+    require_dssb_job "$required" "DSSB native-smoke build evidence is missing: $required"
+  done
+fi
 
 # External payloads are built only in their dedicated jobs. Source and fake
 # paths must run unconditionally in the ordinary build job.
@@ -198,7 +295,7 @@ if [[ -z "$DETERMINISTIC_STEP" ]] || \
 fi
 
 # Unconditional GitHub Actions success paths are prohibited.
-if grep -Eq 'GITHUB_ACTIONS' "$HERMES_TEST" "$IRONCLAW_TEST"; then
+if grep -Eq 'GITHUB_ACTIONS' "$HERMES_TEST" "$IRONCLAW_TEST" "$DSSB_TEST"; then
   GITHUB_SKIP_PRESENT=1
   fail 'GITHUB_ACTIONS-based wrapper success skip is present'
 fi

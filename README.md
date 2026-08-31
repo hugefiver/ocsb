@@ -21,6 +21,8 @@
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_28_2` | Ironclaw v0.28.2 |
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox_v0_29_0` | Ironclaw v0.29.0（同 latest） |
 | `nix run github:hugefiver/ocsb#ironclaw-sandbox_x86_64_v3` | Ironclaw 最新版，x86-64-v3 优化（Haswell+） |
+| `nix run github:hugefiver/ocsb#dssb` | DSSB 持久化 DSH sandbox；binary 名为 `dssb` |
+| `nix run github:hugefiver/ocsb#dsh` | 未经 ocsb 包装的官方 DSH CLI；binary 名为 `dsh` |
 
 每个保留版本同时提供 `_x86_64_v3` 后缀的微架构变体（如 `ironclaw-sandbox_v0_28_2_x86_64_v3`），针对 2013+ Intel/AMD CPU 编译。无后缀变体使用 baseline x86-64-v1。
 
@@ -28,7 +30,7 @@
 
 ### 二进制缓存（Cachix）
 
-建议首次使用前先配置二进制缓存，避免本机长时间编译 heavy package。CI 会把默认 wrapper、Hermes Agent sandbox 和 Ironclaw release 产物 push 到 `https://hugefiver.cachix.org`，命中即秒拉。
+建议首次使用前先配置二进制缓存，避免本机长时间编译 heavy package。CI 会把默认 wrapper、Hermes Agent sandbox、Ironclaw release，以及官方 DSH/DSSB 产物 push 到 `https://hugefiver.cachix.org`，命中即秒拉。
 
 **临时启用（单条命令）**：
 ```bash
@@ -187,6 +189,46 @@ v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、
 完整选项：见 `modules/{app,packages,programs,env,mounts,workspace,network,experimental}.nix`。
 
 要包装其他程序：复用 `templates/opencode.nix`、`templates/hermes-agent.nix` 或 `templates/ironclaw.nix` 当作模板修改即可。
+
+## DSSB（DeepSeek Harness sandbox）
+
+`nix run github:hugefiver/ocsb#dssb -- --profile headless "task"` 启动持久化 wrapper；安装后 binary 名为 `dssb`。`nix run github:hugefiver/ocsb#dsh -- --help` 则是未包装的官方 `dsh` CLI，不创建 DSSB 持久化目录，也不提供 ocsb 的文件或网络边界。
+
+当前固定 npm 发行版为 `@deepseek-ai/dsh@0.1.1-rc.2`，只承诺它实际提供的 `headless` 和 `web` profile；可以用 profile/plugin 机制组成自定义工作流，但不承诺任何未随该版本发布的 bundle。
+
+```bash
+# 已安装 dssb 后；nix run 时在命令前加 `nix run ...#dssb --` 即可
+dssb --profile headless "task"
+# 默认 wrapper 中这只启动沙盒内的 web 服务，不会打开宿主浏览器。
+dssb web --no-open
+
+# 只用发行版支持的 plugin 命令安装/组合 profile。
+export PLUGIN_PACKAGE='@scope/dsh-plugin-example'
+dssb plugin --profile web add "$PLUGIN_PACKAGE"
+
+# 不自动收集密钥；显式请求此一次转发。
+export DEEPSEEK_API_KEY='...'
+dssb --env DEEPSEEK_API_KEY --profile headless "task"
+```
+
+默认持久化布局是 `~/.cache/ocsb/dssb/{home,state}`，可用 `OCSB_DSSB_PERSIST_DIR=/absolute/path` 或 `--persist-dir /absolute/path` 覆盖。wrapper 将 `home/` 挂到沙箱 `/home/sandbox`，state 固定在 `state/`；调用者 cwd 不会切换，仍是 `/workspace` 的来源。已有 workspace 在未显式选择时自动 `--continue`，可用 `--overwrite` 重置当前 workspace。
+
+模块使用根 nixpkgs 的 `pkgs.pnpm` 11.15，但因其 `bin/pnpm -> ../libexec/...` 相对链接，`pnpm` 不能放入批量 `packages`。它经 `programs.pnpm` 以具名绝对 store target 暴露为 `/usr/bin/pnpm`，供 `dsh plugin` 使用，不继承宿主 pnpm。为同名 `dssb.extraPrograms.pnpm` 提供不同定义会产生 module leaf conflict，并 fail closed。
+
+`DSH_PERMISSION_MODE=danger-full-access` 只关闭 DSH 自己的嵌套 sandbox；真实边界仍是 ocsb 的 mount、用户身份和网络策略。DSSB 默认 `network.enable = true`，即 bubblewrap 的 filtered 网络。**默认 `packages.dssb` 不提供宿主可访问的 Web UI**：`dssb web --no-open` 只启动沙盒内服务，wrapper 不会把沙盒 loopback 或端口转发到宿主。Podman 使用现有 filtered backend 映射，不声称和 bwrap iptables 完全等价；systemd-nspawn v1 不支持 filtered 网络并会明确拒绝，需选择 host/no-network 或 bubblewrap。
+
+确实需要由宿主浏览器访问时，下游必须显式组合模块并选择 host network；这会放宽隔离，而不是默认 wrapper 的能力：
+
+```nix
+(ocsb.lib.mkSandbox { inherit system; }) ({ lib, ... }: {
+  imports = [ ocsb.nixModules.dssb ];
+  network.enable = lib.mkForce null;
+})
+```
+
+该覆盖不新增自动端口转发、跨实例 socket 或 runtime 网络 flag。
+
+密钥不会自动从环境捕获或写入持久化快照。可对一次调用显式使用 `--env DEEPSEEK_API_KEY`，或把 DSH credentials 放在 `/home/sandbox/.dsh/` 下的 mode 0600 文件；仍应注意 generic `--env` 的本机进程可见性。
 
 ## Hermes Agent
 
@@ -357,7 +399,7 @@ CLI 与环境变量一一对应：
 
 ### 测试
 
-本地开发优先只验证 ocsb 自身，不在本机编译 Hermes Agent、Ironclaw 等外部应用 payload：
+本地开发优先只验证 ocsb 自身，不在本机编译 Hermes Agent、Ironclaw 或官方 DSH/DSSB 等外部应用 payload：
 
 ```bash
 nix build .#packages.x86_64-linux.default
@@ -369,14 +411,20 @@ bash tests/test_btrfs.sh ./result/bin/ocsb     # 无权限自动 SKIP
 
 nix build .#checks.x86_64-linux.net-test
 nix build .#checks.x86_64-linux.dual-layer-test
+
+# DSSB 只做 source/static contract；不运行 nix build .#dsh 或 .#dssb
+bash tests/test_dssb.sh --source-only
+bash tests/test_ci_runtime.sh
 ```
 
-Hermes/Ironclaw 等外部应用 wrapper 的完整构建与缓存由 CI/Cachix 负责；本地只在已有外部构建产物时运行对应 wrapper 测试，例如：
+普通 CI job 运行 DSSB source、fake wrapper 和 fake module gates；官方 `dsh`/`dssb` payload 只由独立 `dssb-build` job 构建、验证 native smoke 并推送 Cachix。本地开发时不在本地构建官方 `dsh`/`dssb` payload。Hermes/Ironclaw 等外部应用 wrapper 的完整构建与缓存同样由 CI/Cachix 负责；本地只在已有外部构建产物时运行对应 wrapper 测试，例如：
 
 ```bash
 bash tests/test_hermes_agent.sh /path/to/ocsb-hermes
 
 bash tests/test_ironclaw.sh /path/to/ocsb-ironclaw
+
+bash tests/test_dssb.sh --case real-wrapper /path/to/dssb
 ```
 
 ## License
