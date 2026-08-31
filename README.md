@@ -153,7 +153,14 @@ v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、
         app.package = pkgs.opencode;       # null 则 = 交互 bash
         app.binPath = "bin/opencode";
 
+        # packages 批量暴露包内 binaries。
         packages = with pkgs; [ git ripgrep fd jq curl ];
+
+        # programs 只公开一个具名 command，不公开整个包的 bin 目录。
+        programs.rg = {
+          package = pkgs.ripgrep;
+          binPath = "bin/rg";
+        };
         mounts.ro = [ "~/.config/opencode" ];
         mounts.rw = [];
 
@@ -169,7 +176,15 @@ v1 支持边界故意保守：Podman/systemd-nspawn 支持 `direct`、`btrfs`、
 }
 ```
 
-完整选项：见 `modules/{app,packages,env,mounts,workspace,network,experimental}.nix`。
+`packages` 会批量公开 package 的 binaries；`programs.<command>` 是单命令别名，目标必须是存在、可执行的 regular file。缺失、目录、不可执行 target，或与 `packages`/其他 `programs` 的命令名冲突都会 fail closed。沙箱 PATH 固定顺序为：
+
+```text
+<app.binPath 所在目录>:/usr/bin:/home/sandbox/.nix-profile/bin:/nix/var/nix/profiles/default/bin
+```
+
+因此应用自身 command 优先，声明式 `packages`/`programs` 随后，可写 Nix profile 中后来安装的同名 command 不能遮蔽它们。
+
+完整选项：见 `modules/{app,packages,programs,env,mounts,workspace,network,experimental}.nix`。
 
 要包装其他程序：复用 `templates/opencode.nix`、`templates/hermes-agent.nix` 或 `templates/ironclaw.nix` 当作模板修改即可。
 

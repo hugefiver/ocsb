@@ -71,11 +71,53 @@ let
     ]
     else [ ];
 
-  # --- Package PATH ---
-  # Always include bash; user packages are additive
+  # --- Public command directories ---
+  # Generic packages retain their existing aggregate /usr/bin behavior. Named
+  # programs are built separately so each package contributes exactly one alias.
+  programNames = builtins.attrNames cfg.programs;
+  validProgramName = name:
+    builtins.match "^[A-Za-z0-9][A-Za-z0-9._+-]*$" name != null
+    && !(lib.hasInfix ".." name);
+  checkedPrograms =
+    assert lib.assertMsg
+      (lib.all validProgramName programNames)
+      "programs command names must match ^[A-Za-z0-9][A-Za-z0-9._+-]*$ and cannot contain '..'";
+    cfg.programs;
+  namedPrograms = lib.mapAttrsToList (name: program: {
+    inherit name;
+    target = "${program.package}/${program.binPath}";
+  }) checkedPrograms;
+  packageBin = pkgs.symlinkJoin {
+    name = "${cfg.app.name}-package-bin";
+    paths = cfg.packages;
+  };
+  namedProgramsBin = pkgs.runCommand "${cfg.app.name}-named-programs-bin" { } ''
+    mkdir -p "$out/bin"
+    ${lib.concatMapStringsSep "\n" (program: ''
+      _program_name=${lib.escapeShellArg program.name}
+      _program_target=${lib.escapeShellArg program.target}
+      if [[ ! -e "$_program_target" ]]; then
+        echo "ocsb: programs.$_program_name target does not exist: $_program_target" >&2
+        exit 1
+      fi
+      if [[ ! -f "$_program_target" ]]; then
+        echo "ocsb: programs.$_program_name target is not a regular file: $_program_target" >&2
+        exit 1
+      fi
+      if [[ ! -x "$_program_target" ]]; then
+        echo "ocsb: programs.$_program_name target is not executable: $_program_target" >&2
+        exit 1
+      fi
+      if [[ -e "${packageBin}/bin/$_program_name" || -L "${packageBin}/bin/$_program_name" || -e "${pkgs.bashInteractive}/bin/$_program_name" || -L "${pkgs.bashInteractive}/bin/$_program_name" ]]; then
+        echo "ocsb: programs.$_program_name collides with an existing /usr/bin command" >&2
+        exit 1
+      fi
+      ln -s -- "$_program_target" "$out/bin/$_program_name"
+    '') namedPrograms}
+  '';
   sandboxBin = pkgs.symlinkJoin {
     name = "${cfg.app.name}-sandbox-bin";
-    paths = [ pkgs.bashInteractive ] ++ cfg.packages;
+    paths = [ pkgs.bashInteractive packageBin namedProgramsBin ];
   };
 
   # --- Closure-only /nix/store ---
@@ -83,7 +125,7 @@ let
   # closure of only the packages we need and mount just those paths.
   closureInfoDrv = pkgs.closureInfo {
     rootPaths =
-      [ sandboxBin pkgs.bubblewrap pkgs.cacert mountAnchor ]
+      [ packageBin namedProgramsBin sandboxBin pkgs.bubblewrap pkgs.cacert mountAnchor ]
       ++ lib.optional (cfg.app.package != null) cfg.app.package
       ++ lib.optional (preExecScript != null) preExecScript
       ++ lib.optional (preExecScript == null) envCaptureScript
@@ -155,14 +197,13 @@ let
       exec "$@"
     '';
 
-  # PATH inside sandbox: include app's bin dir if a package is configured,
-  # plus common Nix profile locations so `nix profile install` binaries are
-  # immediately callable in interactive sessions.
+  # PATH inside sandbox: the app directory has deterministic priority, followed
+  # by public commands and then writable profile locations.
   nixProfilePath = "/home/sandbox/.nix-profile/bin:/nix/var/nix/profiles/default/bin";
   sandboxPath =
     if cfg.app.package != null
-    then "${cfg.app.package}/bin:${nixProfilePath}:/usr/bin"
-    else "${nixProfilePath}:/usr/bin";
+    then "${cfg.app.package}/${builtins.dirOf cfg.app.binPath}:/usr/bin:${nixProfilePath}"
+    else "/usr/bin:${nixProfilePath}";
 
   attachEnvPath = "/tmp/ocsb-attach.env";
 
