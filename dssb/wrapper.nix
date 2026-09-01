@@ -6,6 +6,8 @@ pkgs.writeShellScriptBin "dssb" ''
   PERSIST_DIR=""
   WORKSPACE_NAME="dssb"
   HAS_WORKSPACE_ACTION=0
+  HAS_EXPLICIT_STRATEGY=0
+  SELECTED_BACKEND="bubblewrap"
   SHELL_MODE=0
   OCSB_ARGS=()
   DSH_ARGS=()
@@ -23,6 +25,8 @@ OCSB options:
   --attach | --attach=PID
   --env NAME[=VALUE]
   --ro HOST:SANDBOX | --rw HOST:SANDBOX
+  --overlay-mount HOST:SANDBOX
+  --snap-mount HOST:SANDBOX
   -s, --shell
   -h, --help
 
@@ -96,7 +100,19 @@ USAGE_EOF
         OCSB_ARGS+=("$1" "$2")
         shift 2
         ;;
-      --strategy|--backend|--env|--ro|--rw)
+      --strategy)
+        [[ $# -ge 2 ]] || { echo "dssb: $1 requires a value" >&2; exit 2; }
+        HAS_EXPLICIT_STRATEGY=1
+        OCSB_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --backend)
+        [[ $# -ge 2 ]] || { echo "dssb: $1 requires a value" >&2; exit 2; }
+        SELECTED_BACKEND="$2"
+        OCSB_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --env|--ro|--rw|--overlay-mount|--snap-mount)
         [[ $# -ge 2 ]] || { echo "dssb: $1 requires a value" >&2; exit 2; }
         OCSB_ARGS+=("$1" "$2")
         shift 2
@@ -125,6 +141,14 @@ USAGE_EOF
         ;;
     esac
   done
+
+  if [[ "$HAS_EXPLICIT_STRATEGY" -eq 0 ]]; then
+    case "$SELECTED_BACKEND" in
+      podman|systemd-nspawn)
+        OCSB_ARGS+=(--strategy direct)
+        ;;
+    esac
+  fi
 
   if [[ -z "$PERSIST_DIR" ]]; then
     if [[ -n "''${OCSB_DSSB_PERSIST_DIR:-}" ]]; then

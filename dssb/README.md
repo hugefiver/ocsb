@@ -56,11 +56,15 @@ wrapper flags：
 
 - `--persist-dir DIR`、`-w/--workspace NAME`、`--strategy STRATEGY`、`--backend bubblewrap|podman|systemd-nspawn`
 - `--continue`、`--overwrite`、`--attach`/`--attach=PID`
-- `--env NAME[=VALUE]`、`--ro HOST:SANDBOX`、`--rw HOST:SANDBOX`、`-s/--shell`、`--`
+- `--env NAME[=VALUE]`、`--ro HOST:SANDBOX`、`--rw HOST:SANDBOX`
+- `--overlay-mount HOST:SANDBOX`（仅 bubblewrap）、`--snap-mount HOST:SANDBOX`（source 必须是 btrfs subvolume root）
+- `-s/--shell`、`--`
 
 默认 persist root 为 `~/.cache/ocsb/dssb`，其中 `home/` 与 `state/` 必须是当前用户拥有的 mode 0700 实体目录。`home/` 挂到 `/home/sandbox`，`OCSB_STATE_BASE_DIR` 固定为 `$PERSIST_DIR/state`；wrapper 保持 caller cwd，因此 caller project 仍映射到 `/workspace`。可使用 `OCSB_DSSB_PERSIST_DIR=/absolute/path` 或 `--persist-dir /absolute/path` 覆盖；相对路径、symlink 和不安全对象会被拒绝。
 
-DSSB 默认使用 filtered bubblewrap 网络（`network.enable = true`）。`DSH_PERMISSION_MODE=danger-full-access` 仅禁用 DSH 的内部嵌套 sandbox，真实文件、身份与网络边界仍由 ocsb 负责。Podman 是现有 filtered backend 的映射，不与 bwrap iptables 声称完全等价；systemd-nspawn v1 的 filtered 网络会 fail closed。
+未指定 backend 时，wrapper 让模块默认的 `auto` strategy 自行决定；默认或显式 bubblewrap 仍保留模块 auto。显式选择 podman 或 systemd-nspawn 且未提供 `--strategy` 时，wrapper 注入 `direct`，避免把不支持的 auto overlayfs 交给非 bubblewrap backend。显式策略始终原样保留，包括随后重复指定 backend 时的最后一个 backend。
+
+`--overlay-mount` 是 bubblewrap-only。`--snap-mount` 需要 btrfs source，且仍受所选 backend 的既有约束：Podman/systemd-nspawn 支持 `direct`、`btrfs`、`git-worktree` 与 `--snap-mount`，但不支持 overlayfs workspace 或 `--overlay-mount`。DSSB 默认使用 filtered bubblewrap 网络（`network.enable = true`）。`DSH_PERMISSION_MODE=danger-full-access` 仅禁用 DSH 的内部嵌套 sandbox，真实文件、身份与网络边界仍由 ocsb 负责。Podman 是现有 filtered backend 的映射，不与 bwrap iptables 声称完全等价；systemd-nspawn v1 仍不支持默认 filtered network，并会 fail closed。
 
 不会自动捕获 secret-like 环境变量。需要临时传递 API key 时，显式使用 `dssb --env DEEPSEEK_API_KEY ...`；长期 credentials 建议放在 `$DSH_HOME/.credentials.yaml` 等 DSH 文件中，并保持 mode 0600。generic `--env` 仍可能对本机进程可见，不应把密钥写入 Nix source、默认参数或持久化 env snapshot。
 

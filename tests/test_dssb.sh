@@ -248,6 +248,9 @@ verify_documentation_and_ci_source() {
     '默认 `packages.dssb` 不提供宿主可访问的 Web UI' \
     'dssb plugin --profile web add' \
     '--env DEEPSEEK_API_KEY' \
+    '--overlay-mount HOST:SANDBOX' \
+    '--snap-mount HOST:SANDBOX' \
+    '显式选择 podman/systemd-nspawn 且未给 --strategy 时 wrapper 注入 direct' \
     '~/.cache/ocsb/dssb/{home,state}' \
     '0.1.1-rc.2' \
     '不在本地构建官方 `dsh`/`dssb` payload'; do
@@ -264,6 +267,10 @@ verify_documentation_and_ci_source() {
     'dssb.extraPrograms.pnpm' \
     'network.enable = lib.mkForce null;' \
     '不会自动转发端口' \
+    '`--overlay-mount HOST:SANDBOX`' \
+    '`--snap-mount HOST:SANDBOX`' \
+    '默认或显式 bubblewrap 仍保留模块 auto' \
+    '显式策略始终原样保留' \
     'npm install --package-lock-only --ignore-scripts' \
     'npmConfigHook' \
     'postConfigure' \
@@ -679,6 +686,7 @@ module_bubblewrap_case() {
 wrapper_contract_case() {
   local wrapper="$1"
   local caller persist log_first log_existing log_continue log_overwrite log_exit exit_rc
+  local case_persist case_log
 
   [[ -x "$wrapper" ]] || fail "fake wrapper is not executable: $wrapper"
   make_test_tmp
@@ -690,6 +698,16 @@ wrapper_contract_case() {
   log_overwrite="$TEST_TMP/wrapper-log-overwrite"
   log_exit="$TEST_TMP/wrapper-log-exit"
   install -d -m 0700 "$caller" "$log_first" "$log_existing" "$log_continue" "$log_overwrite" "$log_exit"
+
+  run_fresh_wrapper_case() {
+    local case_name="$1"
+    shift
+
+    case_persist="$TEST_TMP/wrapper-${case_name}-persist"
+    case_log="$TEST_TMP/wrapper-${case_name}-log"
+    install -d -m 0700 "$case_log"
+    DSSB_FAKE_LOG="$case_log" "$wrapper" --persist-dir "$case_persist" "$@"
+  }
 
   (
     cd "$caller"
@@ -725,6 +743,63 @@ wrapper_contract_case() {
   echo 'PASS[GREEN-dssb-wrapper-argv]: control and DSH arrays preserved'
   echo 'PASS[GREEN-dssb-wrapper-action]: first run fresh existing run continue explicit action unique'
 
+  local overlay_spec='overlay host with spaces:/overlay sandbox with spaces'
+  local snap_spec='snapshot host with spaces:/snapshot sandbox with spaces'
+  run_fresh_wrapper_case mount-routing \
+    --overlay-mount "$overlay_spec" --snap-mount "$snap_spec" -- --profile headless
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" \
+    --overlay-mount "$overlay_spec" --snap-mount "$snap_spec" -- --profile headless
+
+  local dsh_overlay_spec='DSH overlay host with spaces:/DSH overlay sandbox with spaces'
+  run_fresh_wrapper_case first-dsh-argument \
+    --profile headless --overlay-mount "$dsh_overlay_spec"
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" -- \
+    --profile headless --overlay-mount "$dsh_overlay_spec"
+  echo 'PASS[GREEN-dssb-wrapper-mount-routing]: overlay snapshot and first-DSH-argument boundaries'
+
+  run_fresh_wrapper_case implicit-bubblewrap -- --implicit-bubblewrap
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" -- --implicit-bubblewrap
+
+  run_fresh_wrapper_case explicit-bubblewrap \
+    --backend bubblewrap -- --explicit-bubblewrap
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" \
+    --backend bubblewrap -- --explicit-bubblewrap
+
+  run_fresh_wrapper_case podman \
+    --backend podman -- --podman
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" \
+    --backend podman --strategy direct -- --podman
+
+  run_fresh_wrapper_case systemd-nspawn \
+    --backend systemd-nspawn -- --systemd-nspawn
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" \
+    --backend systemd-nspawn --strategy direct -- --systemd-nspawn
+
+  run_fresh_wrapper_case explicit-strategy \
+    --backend podman --strategy git-worktree -- --explicit-strategy
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" \
+    --backend podman --strategy git-worktree -- --explicit-strategy
+
+  run_fresh_wrapper_case podman-then-bubblewrap \
+    --backend podman --backend bubblewrap -- --podman-then-bubblewrap
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" \
+    --backend podman --backend bubblewrap -- --podman-then-bubblewrap
+
+  run_fresh_wrapper_case bubblewrap-then-nspawn \
+    --backend bubblewrap --backend systemd-nspawn -- --bubblewrap-then-nspawn
+  assert_nul_argv "$case_log/argv.nul" \
+    --rw "$case_persist/home:/home/sandbox" \
+    --backend bubblewrap --backend systemd-nspawn --strategy direct -- --bubblewrap-then-nspawn
+  echo 'PASS[GREEN-dssb-wrapper-backend-strategy]: non-bwrap direct default explicit strategy and bubblewrap auto preserved'
+
   set +e
   (
     cd "$caller"
@@ -740,6 +815,7 @@ wrapper_safety_case() {
   local wrapper="$1"
   local caller output persist_target symlink_path file_path mode_path home_path state_path
   local workspace output_secret persist_secret log_secret persist_explicit log_explicit secret
+  local missing_overlay_log missing_snap_log
 
   [[ -x "$wrapper" ]] || fail "fake wrapper is not executable: $wrapper"
   [[ "${DEEPSEEK_API_KEY:-}" == "fixture-secret" ]] || \
@@ -815,6 +891,22 @@ wrapper_safety_case() {
   capture_failure "$output" "$wrapper" --persist-dir "$TEST_TMP/shell-persist" --shell -- --profile headless
   [[ "$CAPTURE_STATUS" -eq 2 ]] || fail "shell with DSH args must exit 2, got $CAPTURE_STATUS"
   grep -Fq -- '--shell cannot be combined with DSH arguments' "$output" || fail "shell argument rejection is unclear"
+
+  missing_overlay_log="$TEST_TMP/missing-overlay-mount-log"
+  install -d -m 0700 "$missing_overlay_log"
+  output="$TEST_TMP/missing-overlay-mount.out"
+  capture_failure "$output" env DSSB_FAKE_LOG="$missing_overlay_log" "$wrapper" --overlay-mount
+  [[ "$CAPTURE_STATUS" -eq 2 ]] || fail "missing --overlay-mount value must exit 2, got $CAPTURE_STATUS"
+  grep -Fq 'dssb: --overlay-mount requires a value' "$output" || fail "missing overlay mount error is unclear"
+  [[ ! -e "$missing_overlay_log/argv.nul" ]] || fail "fake inner ran after missing --overlay-mount value"
+
+  missing_snap_log="$TEST_TMP/missing-snap-mount-log"
+  install -d -m 0700 "$missing_snap_log"
+  output="$TEST_TMP/missing-snap-mount.out"
+  capture_failure "$output" env DSSB_FAKE_LOG="$missing_snap_log" "$wrapper" --snap-mount
+  [[ "$CAPTURE_STATUS" -eq 2 ]] || fail "missing --snap-mount value must exit 2, got $CAPTURE_STATUS"
+  grep -Fq 'dssb: --snap-mount requires a value' "$output" || fail "missing snap mount error is unclear"
+  [[ ! -e "$missing_snap_log/argv.nul" ]] || fail "fake inner ran after missing --snap-mount value"
 
   persist_secret="$TEST_TMP/persist-secret"
   log_secret="$TEST_TMP/log-secret"

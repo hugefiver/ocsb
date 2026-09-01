@@ -37,6 +37,130 @@ let
   pkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
   lib = pkgs.lib;
   mkSandbox = import (flakeDir + "/lib/mkSandbox.nix") { inherit pkgs lib; };
+  realMountAnchor = pkgs.callPackage (flakeDir + "/pkgs/mount-anchor.nix") { };
+  backendPlanMountAnchor = pkgs.writeShellScriptBin "ocsb-mount-anchor" ''
+    set -euo pipefail
+
+    fail() {
+      printf 'ocsb backend-plan mount-anchor: %s\n' "$*" >&2
+      exit 1
+    }
+
+    if [[ "''${1:-}" == "--mutation-only" ]]; then
+      exec ${realMountAnchor}/bin/ocsb-mount-anchor "$@"
+    fi
+
+    source_tokens=()
+    source_paths=()
+    source_devs=()
+    source_inos=()
+    source_requirednesses=()
+    source_drop_starts=()
+    source_drop_counts=()
+    replacement_indices=()
+    replacement_tokens=()
+    payload=()
+
+    while (( $# > 0 )); do
+      case "$1" in
+        --)
+          shift
+          payload=("$@")
+          break
+          ;;
+        --backend|--namespace|--host-uid|--host-gid|--anchor-root|--inherited-fd-spec|--workspace-receipt|--workspace-nonce|--workspace-project|--workspace-base|--workspace-name)
+          [[ $# -ge 2 && -n "$2" ]] || fail "missing value for $1"
+          shift 2
+          ;;
+        --source-spec)
+          [[ $# -ge 2 && "$2" != *$'\n'* && "$2" != *$'\r'* ]] || fail "malformed --source-spec"
+          fields=()
+          IFS=$'\t' read -r -a fields <<< "$2"
+          [[ "''${#fields[@]}" -eq 9 ]] || fail "malformed --source-spec"
+          source_token="''${fields[0]}"
+          source_path="''${fields[1]}"
+          containment_root="''${fields[2]}"
+          source_dev="''${fields[3]}"
+          source_ino="''${fields[4]}"
+          source_type="''${fields[5]}"
+          parsed_source_requiredness="''${fields[6]}"
+          source_drop_start="''${fields[7]}"
+          source_drop_count="''${fields[8]}"
+          [[ "$source_token" =~ ^@OCSB_SOURCE_[0-9]+@$ && "$source_path" == /* && "$containment_root" == /* &&
+            "$source_dev" =~ ^[0-9]+$ && "$source_ino" =~ ^[0-9]+$ &&
+            "$source_drop_start" =~ ^[0-9]+$ && "$source_drop_count" =~ ^[0-9]+$ ]] || fail "malformed --source-spec"
+          case "$source_type" in directory|regular) ;; *) fail "malformed --source-spec" ;; esac
+          case "$parsed_source_requiredness" in required|optional) ;; *) fail "malformed --source-spec" ;; esac
+          source_tokens+=("$source_token")
+          source_paths+=("$source_path")
+          source_devs+=("$source_dev")
+          source_inos+=("$source_ino")
+          source_requirednesses+=("$parsed_source_requiredness")
+          source_drop_starts+=("$source_drop_start")
+          source_drop_counts+=("$source_drop_count")
+          shift 2
+          ;;
+        --replace)
+          [[ $# -ge 2 ]] || fail "missing --replace value"
+          replacement_index="''${2%%:*}"
+          replacement_token="''${2#*:}"
+          [[ "$replacement_index" =~ ^[0-9]+$ && "$replacement_token" =~ ^@OCSB_SOURCE_[0-9]+@$ ]] || fail "malformed --replace"
+          replacement_indices+=("$replacement_index")
+          replacement_tokens+=("$replacement_token")
+          shift 2
+          ;;
+        *)
+          fail "unknown option $1"
+          ;;
+      esac
+    done
+
+    [[ "''${#source_tokens[@]}" -eq "''${#replacement_indices[@]}" && "''${#payload[@]}" -gt 0 ]] || fail "missing source replacement or payload"
+    drop_payload=()
+    for ((source_index = 0; source_index < ''${#source_tokens[@]}; source_index++)); do
+      source_token="''${source_tokens[$source_index]}"
+      source_path="''${source_paths[$source_index]}"
+      source_dev=$((10#''${source_devs[$source_index]}))
+      source_ino=$((10#''${source_inos[$source_index]}))
+      source_requiredness="''${source_requirednesses[$source_index]}"
+      drop_start=$((10#''${source_drop_starts[$source_index]}))
+      drop_count=$((10#''${source_drop_counts[$source_index]}))
+      replacement_index=$((10#''${replacement_indices[$source_index]}))
+      replacement_token="''${replacement_tokens[$source_index]}"
+      (( replacement_index < ''${#payload[@]} )) || fail "--replace index outside payload"
+      [[ "$replacement_token" == "$source_token" && "''${payload[$replacement_index]}" == *"$source_token"* ]] || fail "replacement token mismatch"
+
+      if (( source_dev != 0 || source_ino != 0 )); then
+        (( source_dev != 0 && source_ino != 0 )) || fail "incomplete source identity"
+        payload_value="''${payload[$replacement_index]}"
+        prefix="''${payload_value%%"$source_token"*}"
+        suffix="''${payload_value#*"$source_token"}"
+        payload[$replacement_index]="''${prefix}''${source_path}''${suffix}"
+      else
+        [[ "$source_requiredness" == optional && "$drop_count" -gt 0 ]] || fail "required source is absent"
+        (( drop_start < ''${#payload[@]} && drop_count <= ''${#payload[@]} - drop_start &&
+          replacement_index >= drop_start && replacement_index < drop_start + drop_count )) || fail "invalid optional drop range"
+        for ((payload_index = drop_start; payload_index < drop_start + drop_count; payload_index++)); do
+          drop_payload[$payload_index]=1
+        done
+      fi
+    done
+
+    rewritten_payload=()
+    for ((payload_index = 0; payload_index < ''${#payload[@]}; payload_index++)); do
+      [[ "''${drop_payload[$payload_index]:-0}" -eq 1 ]] || rewritten_payload+=("''${payload[$payload_index]}")
+    done
+    payload=("''${rewritten_payload[@]}")
+    [[ "''${#payload[@]}" -gt 0 ]] || fail "empty backend payload after optional drops"
+    for payload_value in "''${payload[@]}"; do
+      [[ "$payload_value" != *'@OCSB_SOURCE_'* ]] || fail "unresolved source token"
+    done
+    exec "''${payload[@]}"
+  '';
+  mkBackendPlanSandbox = import (flakeDir + "/lib/mkSandbox.nix") {
+    inherit pkgs lib;
+    mountAnchorHelper = backendPlanMountAnchor;
+  };
 
   appPackage = pkgs.runCommand "ocsb-programs-app" { } ''
     mkdir -p "$out/libexec"
@@ -164,17 +288,17 @@ SCRIPT
     experimental.nixStoreMode = "closure";
     network.enable = null;
     env.OCSB_DAEMON_MARKER = "/workspace/daemon.marker";
-    mounts.ro = [ ];
+    mounts.ro = [ "/ocsb-programs-optional-source-must-not-exist-52ac920" ];
     mounts.rw = [ ];
   };
 
   withName = name: common // { app = common.app // { inherit name; }; };
 in {
   runtime = mkSandbox common;
-  backendPlanPodman = mkSandbox ((withName "programs-plan-podman") // {
+  backendPlanPodman = mkBackendPlanSandbox ((withName "programs-plan-podman") // {
     backend.type = "podman";
   });
-  backendPlanNspawn = mkSandbox ((withName "programs-plan-nspawn") // {
+  backendPlanNspawn = mkBackendPlanSandbox ((withName "programs-plan-nspawn") // {
     backend.type = "systemd-nspawn";
   });
   validation = {
@@ -340,9 +464,6 @@ write_fake_backend() {
 set -euo pipefail
 if [[ "${1:-}" == "--remote=false" && "${2:-}" == "unshare" ]]; then
   shift 2
-  if [[ "$(id -u)" -ne 0 ]]; then
-    exec unshare --user --map-root-user -- "$@"
-  fi
   exec "$@"
 fi
 printf '%s\n' "$@" > "${OCSB_PROGRAMS_BACKEND_PLAN:?}"
@@ -350,30 +471,31 @@ SCRIPT
   chmod 0755 "$path"
 }
 
+write_failing_unshare() {
+  local path="$1"
+  cat > "$path" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\n' 'FAIL[RED-programs-backend-plan-userns]: unshare must not be called' >&2
+exit 97
+SCRIPT
+  chmod 0755 "$path"
+}
+
 run_backend_plan() {
-  local backend="$1"
-  local wrapper="$2"
-  local project="$3"
-  local state_base="$4"
-  local fake_bin="$5"
-  local plan="$6"
+  local wrapper="$1"
+  local project="$2"
+  local state_base="$3"
+  local fake_bin="$4"
+  local plan="$5"
+  local present_source="$6"
   local output rc
 
   set +e
-  if [[ "$backend" == "systemd-nspawn" && "$(id -u)" -ne 0 ]]; then
-    output="$(
-      cd "$project"
-      PATH="$fake_bin:$PATH" OCSB_STATE_BASE_DIR="$state_base" OCSB_PROGRAMS_BACKEND_PLAN="$plan" \
-        unshare --user --map-current-user --mount --keep-caps --fork -- \
-        "$wrapper" --strategy direct --overwrite -- ignored 2>&1
-    )"
-  else
-    output="$(
-      cd "$project"
-      PATH="$fake_bin:$PATH" OCSB_STATE_BASE_DIR="$state_base" OCSB_PROGRAMS_BACKEND_PLAN="$plan" \
-        "$wrapper" --strategy direct --overwrite -- ignored 2>&1
-    )"
-  fi
+  output="$(
+    cd "$project"
+    PATH="$fake_bin:$PATH" OCSB_STATE_BASE_DIR="$state_base" OCSB_PROGRAMS_BACKEND_PLAN="$plan" \
+      "$wrapper" --strategy direct --overwrite --ro "$present_source:/workspace/present-ampersand" -- ignored 2>&1
+  )"
   rc=$?
   set -e
   if [[ "$rc" -ne 0 || ! -s "$plan" ]]; then
@@ -385,8 +507,14 @@ run_backend_plan() {
 backend_plan_case() {
   local podman_output nspawn_output podman_store nspawn_store podman_bin nspawn_bin
   local project fake_bin podman_state nspawn_state podman_plan nspawn_plan podman_mounts nspawn_mounts
+  local optional_source present_source
 
   echo "=== declarative programs backend plan ==="
+  optional_source="/ocsb-programs-optional-source-must-not-exist-52ac920"
+  [[ ! -e "$optional_source" && ! -L "$optional_source" ]] || {
+    echo "test_programs: optional backend-plan source unexpectedly exists: $optional_source" >&2
+    return 1
+  }
   podman_output="$(build_fixture backendPlanPodman 2>&1)" || {
     printf '%s\n' "$podman_output" >&2
     return 1
@@ -406,11 +534,14 @@ backend_plan_case() {
   podman_plan="$TEST_TMP/podman.plan"
   nspawn_plan="$TEST_TMP/nspawn.plan"
   mkdir -p "$project" "$fake_bin" "$podman_state" "$nspawn_state"
+  present_source="$project/present&source"
+  mkdir -p "$present_source"
   write_fake_backend "$fake_bin/podman"
   write_fake_backend "$fake_bin/systemd-nspawn"
+  write_failing_unshare "$fake_bin/unshare"
 
-  run_backend_plan podman "$podman_bin" "$project" "$podman_state" "$fake_bin" "$podman_plan" || return 1
-  run_backend_plan systemd-nspawn "$nspawn_bin" "$project" "$nspawn_state" "$fake_bin" "$nspawn_plan" || return 1
+  run_backend_plan "$podman_bin" "$project" "$podman_state" "$fake_bin" "$podman_plan" "$present_source" || return 1
+  run_backend_plan "$nspawn_bin" "$project" "$nspawn_state" "$fake_bin" "$nspawn_plan" "$present_source" || return 1
 
   podman_mounts="$(grep -Ec ':/usr/bin:ro$' "$podman_plan")"
   nspawn_mounts="$(grep -Ec '^--bind-ro=.*:/usr/bin$' "$nspawn_plan")"
@@ -419,6 +550,10 @@ backend_plan_case() {
     cat "$podman_plan" "$nspawn_plan" >&2
     return 1
   }
+  ! grep -Fq -- "$optional_source" "$podman_plan"
+  ! grep -Fq -- "$optional_source" "$nspawn_plan"
+  grep -Fq -- "$present_source:/workspace/present-ampersand:ro" "$podman_plan"
+  grep -Fxq -- "--bind-ro=$present_source:/workspace/present-ampersand" "$nspawn_plan"
   grep -Eq '^PATH=.*/libexec:/usr/bin:/home/sandbox/\.nix-profile/bin:/nix/var/nix/profiles/default/bin$' "$podman_plan"
   grep -Eq '^--setenv=PATH=.*/libexec:/usr/bin:/home/sandbox/\.nix-profile/bin:/nix/var/nix/profiles/default/bin$' "$nspawn_plan"
 

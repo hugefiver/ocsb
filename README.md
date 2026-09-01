@@ -213,6 +213,10 @@ dssb --env DEEPSEEK_API_KEY --profile headless "task"
 
 默认持久化布局是 `~/.cache/ocsb/dssb/{home,state}`，可用 `OCSB_DSSB_PERSIST_DIR=/absolute/path` 或 `--persist-dir /absolute/path` 覆盖。wrapper 将 `home/` 挂到沙箱 `/home/sandbox`，state 固定在 `state/`；调用者 cwd 不会切换，仍是 `/workspace` 的来源。已有 workspace 在未显式选择时自动 `--continue`，可用 `--overwrite` 重置当前 workspace。
 
+wrapper 会原样转发四类 mount argv：`--ro HOST:SANDBOX`、`--rw HOST:SANDBOX`、`--overlay-mount HOST:SANDBOX` 与 `--snap-mount HOST:SANDBOX`。其中 `--overlay-mount` 仅适用于 bubblewrap；`--snap-mount` 的 source 必须是 btrfs subvolume root，并受 backend 支持范围限制。
+
+未指定 backend 时，模块默认 strategy 是 `auto`；默认或显式 bubblewrap 都保留该 auto 行为。显式选择 podman/systemd-nspawn 且未给 --strategy 时 wrapper 注入 direct。显式传入的 strategy 不会被 wrapper 改写。Podman/systemd-nspawn 支持 `direct`、`btrfs`、`git-worktree`、`--ro`、`--rw` 与 `--snap-mount`，但不支持 overlayfs workspace 或 `--overlay-mount`，所以不能与 bubblewrap 视为完全对等。
+
 模块使用根 nixpkgs 的 `pkgs.pnpm` 11.15，但因其 `bin/pnpm -> ../libexec/...` 相对链接，`pnpm` 不能放入批量 `packages`。它经 `programs.pnpm` 以具名绝对 store target 暴露为 `/usr/bin/pnpm`，供 `dsh plugin` 使用，不继承宿主 pnpm。为同名 `dssb.extraPrograms.pnpm` 提供不同定义会产生 module leaf conflict，并 fail closed。
 
 `DSH_PERMISSION_MODE=danger-full-access` 只关闭 DSH 自己的嵌套 sandbox；真实边界仍是 ocsb 的 mount、用户身份和网络策略。DSSB 默认 `network.enable = true`，即 bubblewrap 的 filtered 网络。**默认 `packages.dssb` 不提供宿主可访问的 Web UI**：`dssb web --no-open` 只启动沙盒内服务，wrapper 不会把沙盒 loopback 或端口转发到宿主。Podman 使用现有 filtered backend 映射，不声称和 bwrap iptables 完全等价；systemd-nspawn v1 不支持 filtered 网络并会明确拒绝，需选择 host/no-network 或 bubblewrap。

@@ -10,6 +10,7 @@ HERMES_TEST="$SCRIPT_DIR/test_hermes_agent.sh"
 IRONCLAW_TEST="$SCRIPT_DIR/test_ironclaw.sh"
 DSSB_TEST="$SCRIPT_DIR/test_dssb.sh"
 DSSB_PACKAGE="$REPO_ROOT/dssb/package.nix"
+PROGRAMS_TEST="$SCRIPT_DIR/test_programs.sh"
 MOUNT_TEST="$SCRIPT_DIR/test_mount_anchor.sh"
 FILTERED_TEST="$SCRIPT_DIR/test_filtered_cleanup.sh"
 
@@ -156,6 +157,24 @@ for required in \
 done
 require_build_runtime 'SKIP[CI-REQUIRED-dssb-real-bwrap]: user namespace mapping unavailable' \
   'ordinary build job must emit the dedicated DSSB bwrap capability skip marker'
+
+# The backend-plan source fixture must use its dedicated mount-anchor helper,
+# without reintroducing a user-namespace dependency ahead of the runtime probe.
+for required in \
+  'backendPlanMountAnchor' \
+  'mountAnchorHelper = backendPlanMountAnchor;' \
+  'write_failing_unshare()' \
+  'exec ${realMountAnchor}/bin/ocsb-mount-anchor "$@"'; do
+  require_literal "$PROGRAMS_TEST" "$required" "backend-plan mount-anchor source is missing: $required" || true
+done
+
+BACKEND_PLAN_LINE="$(awk '/^[[:space:]]*bash tests\/test_programs\.sh \. --case backend-plan[[:space:]]*$/ { print NR; exit }' "$WORKFLOW")"
+BWRAP_PROBE_LINE="$(awk '/^[[:space:]]*- name: Probe real bwrap runtime capability[[:space:]]*$/ { print NR; exit }' "$WORKFLOW")"
+if [[ ! "$BACKEND_PLAN_LINE" =~ ^[1-9][0-9]*$ || ! "$BWRAP_PROBE_LINE" =~ ^[1-9][0-9]*$ ]]; then
+  fail 'backend-plan command or real bwrap capability probe is missing from the workflow'
+elif (( BACKEND_PLAN_LINE >= BWRAP_PROBE_LINE )); then
+  fail 'backend-plan command must run before the real bwrap capability probe'
+fi
 
 # DSSB must keep Nixpkgs' npmConfigHook lifecycle: no package-level global
 # ignore-scripts, no configure override, and no handwritten npm lifecycle.
